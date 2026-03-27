@@ -544,8 +544,32 @@ function updatePage(data, date) {
     document.getElementById('article-title').textContent = data.article?.title || '';
     document.getElementById('article-author').textContent = `文/${data.article?.author || '佚名'}`;
     document.getElementById('article-content').innerHTML = fullContent.replace(/\n/g, '<br>');
-    document.querySelector('#article .bg-img img').src = data.article?.image || '';
+    const articleImg = document.querySelector('#article .bg-img img');
+const articleBg = document.querySelector('#article .bg-img');
+
+if (articleImg && articleBg) {
+    const imageUrl = data.article?.image || '';
     
+    // 重置状态：先隐藏图片，移除加载失败标记
+    articleImg.style.display = 'none';
+    articleBg.classList.remove('load-failed');
+    
+    if (imageUrl) {
+        // 图片加载成功时显示
+        articleImg.onload = () => {
+            articleImg.style.display = 'block';
+        };
+        // 图片加载失败时：保持隐藏，可以添加一个类用于样式（例如显示灰色背景）
+        articleImg.onerror = () => {
+            articleBg.classList.add('load-failed');
+            articleImg.style.display = 'none';
+        };
+        articleImg.src = imageUrl;
+    } else {
+        // 没有图片时，标记为失败状态（显示占位背景）
+        articleBg.classList.add('load-failed');
+    }
+}
     const musicStats = data.musicStats || { favorites: 0, shares: 0 };
     const sentenceStats = data.sentenceStats || { favorites: 0, shares: 0 };
     const articleStats = data.articleStats || { favorites: 0, shares: 0 };
