@@ -252,40 +252,57 @@ body.animating-date-switch .card-container {
 
 /* 音乐卡片封面区域 */
 #album-box {
-    padding: 10px 0;
     margin-bottom: 20px;
     display: flex;
     align-items: center;
     justify-content: center;
 }
 
-.album-image,.album-image img {
+/* 封面容器：圆形，外环阴影，overflow 设为 visible 以显示阴影 */
+.album-image {
     position: relative;
-    width: 260px;
-    height: 260px;
-    transform: rotateZ(0);
-    transition: 0.3s ease all;
-    box-shadow: 0 0px 0 12px #f0f0f0;
+    width: 200px;
+    height: 200px;
     border-radius: 50%;
-    overflow: hidden;
-    background: white;
+    overflow: visible;          /* 让外环阴影可见 */
+    background: transparent;    /* 背景透明，环由阴影实现 */
+    /* 多层实色阴影模拟黑胶唱片外缘的一圈圈渐变 */
+    box-shadow: 
+        0 0 0 4px #222,   /* 最内圈深黑 */
+        0 0 0 5px rgba(255,255,255,0.05),
+        0 0 0 8px #333,
+        0 0 0 9px rgba(255,255,255,0.05),
+        0 0 0 12px #333,
+        0 0 0 13px rgba(255,255,255,0.05),
+        0 0 0 16px #333,
+        0 0 0 17px rgba(255,255,255,0.05),
+        0 0 0 20px #333,
+        0 0 0 21px rgba(255,255,255,0.05),
+        0 0 0 24px #333,
+        0 0 0 25px rgba(255,255,255,0.05),
+        0 0 0 28px #333,
+        0 0 0 29px rgba(255,255,255,0.05),
+        0 0 0 32px #333,
+        0 0 0 33px rgba(255,255,255,0.05),
+        0 0 0 36px #333,
+        0 0 0 37px rgba(255,255,255,0.05),
+        0 0 0 40px #333,
+        0 0 0 41px rgba(255,255,255,0.05),
+        0 0 0 45px #333,
+        0 0 0 46px rgba(255,255,255,0.05),
+        0 0 0 46.5px #222;
 }
 
-
-.album-image:before {
-    content: '';
-    position: absolute;
-    top: 50%;
-    right: 0;
-    left: 0;
-    width: 40px;
-    height: 40px;
-    margin: -20px auto 0 auto;
-    background-color: #FFF;
+/* 图片本身：圆形，覆盖在环内部 */
+.album-image img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
     border-radius: 50%;
-    box-shadow: 0 0 0 10px rgba(0,0,0,0.5);
-    z-index: 3;
+    position: relative;
+    z-index: 1;
 }
+
 
 .album-image.rotating {
     animation: rotate 20s linear infinite;
@@ -295,7 +312,7 @@ body.animating-date-switch .card-container {
 .player-control-wrapper {
     position: relative;
     height: 60px;
-    margin: 10px 0 8px 0;
+    margin-top: 20px !important;
 }
 
 .progress-bar {
@@ -377,7 +394,10 @@ body.animating-date-switch .card-container {
 }
 /* 仅音乐卡片内部垂直居中 */
 .card#music .card-inner {
+    display: flex;
+    flex-direction: column;
     justify-content: center;
+    gap: 40px;  
 }
 
 /* 句子卡片和文章卡片内容顶部对齐（保持原有滚动习惯） */
@@ -410,6 +430,12 @@ body.animating-date-switch .card-container {
     padding-bottom: 56.25%; /* 16:9 */
     overflow: hidden;     
 
+}
+.sentence-image img {
+    object-position: top;
+}
+#article .bg-img img {
+    object-position: top;  
 }
 #article .bg-img img {
     position: absolute;
@@ -547,7 +573,7 @@ body.animating-date-switch .card-container {
     font-size: 18px;
 }
 
-.et-hero-tab:focus,.et-hero-tab:active,.et-hero-tab:hover {
+.et-hero-tab:focus,.et-hero-tab:active {
     background-color: #F0F0F0;
 }
 
@@ -596,7 +622,7 @@ body.animating-date-switch .card-container {
     transition: transform 0.2s, box-shadow 0.2s;
 }
 
-.time-box:active,.time-box:focus,.time-box:hover {
+.time-box:active,.time-box:focus {
     border: 1px solid #000;
 }
 
@@ -688,7 +714,7 @@ body.animating-date-switch .card-container {
 
 .month-item.active {
     background-color: #f2f2f7;
-    border-left: 4px solid #000;
+    border-right: 2px solid #000;
 }
 
 .timeline-right {
