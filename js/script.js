@@ -32,6 +32,88 @@ const timelineTrigger = document.getElementById('timeline-trigger');
 
 let currentDate = '';
 
+// ========== 新增：日期列表与日期切换相关 ==========
+let publishedDates = [];          // 升序排列的日期数组（从旧到新）
+let isDateListLoading = false;    // 防止重复请求
+let isDateSwitching = false;      // 防止日期切换中的并发操作
+
+// ========== 获取并缓存已发布日期列表 ==========
+async function fetchPublishedDatesList() {
+    if (publishedDates.length > 0) return publishedDates;
+    if (isDateListLoading) {
+        await new Promise(resolve => {
+            const checkInterval = setInterval(() => {
+                if (!isDateListLoading) {
+                    clearInterval(checkInterval);
+                    resolve();
+                }
+            }, 50);
+        });
+        return publishedDates;
+    }
+    isDateListLoading = true;
+    try {
+        const res = await fetch(`${API_BASE}/api/posts?type=published`);
+        if (!res.ok) throw new Error('获取日期列表失败');
+        let data = await res.json();
+        let dates = Array.isArray(data) ? data : (data.posts || data.data || []);
+        dates = dates.map(item => item.date).filter(d => d);
+        publishedDates = [...new Set(dates)].sort((a, b) => a.localeCompare(b));
+    } catch (err) {
+        console.warn('获取日期列表失败，日期切换功能将受限', err);
+        publishedDates = [];
+    } finally {
+        isDateListLoading = false;
+    }
+    return publishedDates;
+}
+
+// ========== 获取相邻发布日期 ==========
+function getPrevPublishedDate(currentDate) {
+    if (!publishedDates.length) return null;
+    const idx = publishedDates.indexOf(currentDate);
+    if (idx <= 0) return null;
+    return publishedDates[idx - 1];
+}
+
+function getNextPublishedDate(currentDate) {
+    if (!publishedDates.length) return null;
+    const idx = publishedDates.indexOf(currentDate);
+    if (idx === -1 || idx >= publishedDates.length - 1) return null;
+    return publishedDates[idx + 1];
+}
+
+// ========== 增强的日期切换（支持指定目标卡片类型） ==========
+async function switchToDate(date, targetTab = null) {
+    if (isDateSwitching) return;
+    if (date === currentDate && !targetTab) {
+        closeTimelineModal();
+        return;
+    }
+    isDateSwitching = true;
+    try {
+        if (targetTab) {
+            const targetIndex = getIndexFromId(targetTab);
+            if (targetIndex !== currentIndex) {
+                setCardsPosition(targetIndex);
+                currentIndex = targetIndex;
+                navItems.forEach(item => item.classList.remove('active'));
+                document.querySelector(`[data-target="${targetTab}"]`).classList.add('active');
+                updateHighlight();
+                localStorage.setItem(STATE_KEY, targetTab);
+            }
+        }
+        await loadDataForDate(date);
+        closeTimelineModal();
+        const newUrl = `?date=${date}`;
+        window.history.pushState({ date }, '', newUrl);
+    } catch (err) {
+        console.warn('日期切换失败', err);
+    } finally {
+        isDateSwitching = false;
+    }
+}
+
 // ========== 音频管理器 ==========
 class AudioManager {
     constructor() {
@@ -337,7 +419,13 @@ function switchTo(newIndex) {
     currentIndex = newIndex;
 
     setCardsPosition(newIndex);
-
+    const onTransitionEnd = () => {
+        updateHighlight();
+        updateCardVerticalPosition();
+        isAnimating = false;
+        card.removeEventListener('transitionend', onTransitionEnd);
+    };
+    cards[0].addEventListener('transitionend', onTransitionEnd);
     const targetId = tabOrder[newIndex];
     navItems.forEach(item => item.classList.remove('active'));
     document.querySelector(`[data-target="${targetId}"]`).classList.add('active');
@@ -353,7 +441,7 @@ function getIndexFromId(id) {
     return tabOrder.indexOf(id);
 }
 
-// ========== 日期处理（新增优化） ==========
+// ========== 日期处理 ==========
 function getDateFromUrl() {
     const urlParams = new URLSearchParams(window.location.search);
     return urlParams.get('date');
@@ -372,7 +460,6 @@ async function getLatestPublishedDate() {
         const res = await fetch(`${API_BASE}/api/posts?type=published`);
         if (!res.ok) throw new Error('获取日期列表失败');
         let data = await res.json();
-        // 兼容不同返回格式
         let posts = Array.isArray(data) ? data : (data.posts || data.data || []);
         if (!posts.length) return null;
         const dates = posts.map(item => item.date).filter(d => d);
@@ -412,6 +499,16 @@ async function loadDataForDate(date) {
     currentDate = date;
     currentDisplayDate = date;
 
+    let data = dateDataCache.get(date);
+    if (data) {
+        updatePage(data, date);
+        loadLikedStateFromLocalStorage(date);
+        updateCardVerticalPosition();
+        displayDateInNav(date);
+        audioManager.updateUIForDate(date);
+        return;
+    }
+
     document.querySelectorAll('.stats-actions .favorite-btn i').forEach(icon => {
         icon.classList.remove('ri-heart-2-fill');
         icon.classList.add('ri-heart-2-line');
@@ -420,7 +517,8 @@ async function loadDataForDate(date) {
     try {
         const response = await fetch(`${API_BASE}/api/posts/${date}`);
         if (!response.ok) throw new Error('No data');
-        const data = await response.json();
+        data = await response.json();
+        dateDataCache.set(date, data);
         updatePage(data, date);
         loadLikedStateFromLocalStorage(date);
         updateCardVerticalPosition();
@@ -434,58 +532,38 @@ async function loadDataForDate(date) {
     }
 }
 
-async function switchToDate(date) {
-    if (date === currentDate) {
-        closeTimelineModal();
-        return;
-    }
-    await loadDataForDate(date);
-    closeTimelineModal();
-    const newUrl = `?date=${date}`;
-    window.history.pushState({ date }, '', newUrl);
-    if (currentIndex !== 0) {
-        switchTo(0);
-    }
-}
-
 // ========== 时间轴数据加载 ==========
 async function loadTimelineData() {
-    try {
-        const res = await fetch(`${API_BASE}/api/posts?type=published`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        let data = await res.json();
+    // 显示加载状态
+    const monthListEl = document.querySelector('.month-list');
+    const dateGridEl = document.querySelector('.date-grid');
 
-        let dates = [];
-        if (Array.isArray(data)) {
-            dates = data.map(item => item.date).filter(d => d);
-        }
+    // 复用全局日期列表缓存（确保已加载）
+    await fetchPublishedDatesList();   // 内部已有并发锁，不会重复请求
 
-        dates = [...new Set(dates)].sort((a, b) => b.localeCompare(a));
-
-        if (!dates.length) {
-            document.querySelector('.month-list').innerHTML = '<li>暂无数据</li>';
-            document.querySelector('.date-grid').innerHTML = '<p>暂无日期</p>';
-            return;
-        }
-
-        const monthMap = new Map();
-        dates.forEach(date => {
-            const [year, month] = date.split('-');
-            const key = `${year}-${month}`;
-            if (!monthMap.has(key)) monthMap.set(key, []);
-            monthMap.get(key).push(date);
-        });
-
-        const months = Array.from(monthMap.entries())
-            .map(([key, dates]) => ({ key, dates }))
-            .sort((a, b) => (a.key < b.key ? 1 : -1));
-
-        renderTimeline(months);
-    } catch (error) {
-        console.error('加载时间轴数据失败', error);
-        document.querySelector('.month-list').innerHTML = '<li>加载失败</li>';
-        document.querySelector('.date-grid').innerHTML = '<p>加载失败，请刷新重试</p>';
+    const dates = publishedDates;      // 升序排列的日期数组（旧→新）
+    if (!dates.length) {
+        if (monthListEl) monthListEl.innerHTML = '<li>暂无数据</li>';
+        if (dateGridEl) dateGridEl.innerHTML = '<p>暂无日期</p>';
+        return;
     }
+
+    // 按年月分组
+    const monthMap = new Map();
+    dates.forEach(date => {
+        const [year, month] = date.split('-');
+        const key = `${year}-${month}`;
+        if (!monthMap.has(key)) monthMap.set(key, []);
+        monthMap.get(key).push(date);
+    });
+
+    // 构建月份列表（降序：最近月份在前）
+    const months = Array.from(monthMap.entries())
+        .map(([key, dates]) => ({ key, dates }))
+        .sort((a, b) => b.key.localeCompare(a.key));
+
+    // 渲染时间轴（传入分组数据）
+    renderTimeline(months);
 }
 
 function renderTimeline(months) {
@@ -667,48 +745,6 @@ window.addEventListener('resize', () => {
     }, 300);
 });
 
-const cardContainerEl = document.querySelector('.card-container');
-let touchStartX = 0;
-let touchStartY = 0;
-let touchStartTime = 0;
-
-cardContainerEl.addEventListener('touchstart', (e) => {
-    if (isAnimating) return;
-    const touch = e.touches[0];
-    touchStartX = touch.clientX;
-    touchStartY = touch.clientY;
-    touchStartTime = Date.now();
-}, { passive: true });
-
-cardContainerEl.addEventListener('touchmove', (e) => {
-    if (!touchStartX) return;
-    const touch = e.touches[0];
-    const deltaX = touch.clientX - touchStartX;
-    const deltaY = touch.clientY - touchStartY;
-    if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 10) {
-        e.preventDefault();
-    }
-}, { passive: false });
-
-cardContainerEl.addEventListener('touchend', (e) => {
-    if (isAnimating || touchStartX === 0) return;
-
-    const touchEnd = e.changedTouches[0];
-    const deltaX = touchEnd.clientX - touchStartX;
-    const deltaY = touchEnd.clientY - touchStartY;
-    const deltaTime = Date.now() - touchStartTime;
-
-    if (Math.abs(deltaX) > 30 && Math.abs(deltaX) > Math.abs(deltaY) && deltaTime < 300) {
-        if (deltaX > 0 && currentIndex > 0) {
-            switchTo(currentIndex - 1);
-        } else if (deltaX < 0 && currentIndex < cards.length - 1) {
-            switchTo(currentIndex + 1);
-        }
-    }
-
-    touchStartX = 0;
-});
-
 function openSidebar() {
     document.body.classList.add('sidebar-open');
     sidebar.classList.add('open');
@@ -780,68 +816,70 @@ document.addEventListener('click', async (e) => {
     const type = actionsDiv.dataset.type;
     if (!currentDate || !type) return;
 
-    if (isFavorite) {
-        const icon = target.querySelector('i');
-        if (icon) {
-            icon.classList.remove('heart-beat');
-            void icon.offsetWidth;
-            icon.classList.add('heart-beat');
+if (isFavorite) {
+    const icon = target.querySelector('i');
+    // 动画效果保持不变...
+    const key = `${currentDate}_${type}_favorite`;
+    const isLiked = localStorage.getItem(key) === 'true';
+    const delta = isLiked ? -1 : 1;
 
-            const onAnimationEnd = () => {
-                icon.classList.remove('heart-beat');
-                icon.removeEventListener('animationend', onAnimationEnd);
-            };
-            icon.addEventListener('animationend', onAnimationEnd, { once: true });
+    // 乐观更新 UI
+    const newIconClass = isLiked ? 'ri-heart-2-line' : 'ri-heart-2-fill';
+    icon.classList.remove(isLiked ? 'ri-heart-2-fill' : 'ri-heart-2-line');
+    icon.classList.add(newIconClass);
+    if (isLiked) {
+        localStorage.removeItem(key);
+        removeFavoriteSummary(currentDate, type);
+    } else {
+        localStorage.setItem(key, 'true');
+        // 保存摘要异步进行，失败不影响主流程
+    }
+
+    try {
+        const response = await fetch(`${API_BASE}/api/posts/${currentDate}/stats/${type}/favorite`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ delta })
+        });
+
+        if (!response.ok) throw new Error('更新失败');
+        const data = await response.json();
+
+        // 更新计数
+        const statsKey = type + 'Stats';
+        const newStats = data[statsKey];
+        if (newStats) {
+            const group = actionsDiv;
+            const favoriteBtn = group.querySelector('.favorite-btn');
+            if (favoriteBtn) favoriteBtn.querySelector('.count').textContent = newStats.favorites;
         }
 
-        const key = `${currentDate}_${type}_favorite`;
-        const isLiked = localStorage.getItem(key) === 'true';
-        const delta = isLiked ? -1 : 1;
-
-        try {
-            const response = await fetch(`${API_BASE}/api/posts/${currentDate}/stats/${type}/favorite`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ delta })
-            });
-
-            if (!response.ok) throw new Error('更新失败');
-            const data = await response.json();
-
-            const statsKey = type + 'Stats';
-            const newStats = data[statsKey];
-            if (newStats) {
-                const group = actionsDiv;
-                const favoriteBtn = group.querySelector('.favorite-btn');
-                const shareBtn = group.querySelector('.share-btn');
-                if (favoriteBtn) favoriteBtn.querySelector('.count').textContent = newStats.favorites;
-                if (shareBtn) shareBtn.querySelector('.count').textContent = newStats.shares;
-            }
-
-            const icon = target.querySelector('i');
-            if (isLiked) {
-                localStorage.removeItem(key);
-                icon.classList.remove('ri-heart-2-fill');
-                icon.classList.add('ri-heart-2-line');
-                removeFavoriteSummary(currentDate, type);
-            } else {
-                localStorage.setItem(key, 'true');
-                icon.classList.remove('ri-heart-2-line');
-                icon.classList.add('ri-heart-2-fill');
-                try {
-                    const detailResponse = await fetch(`${API_BASE}/api/posts/${currentDate}`);
-                    if (detailResponse.ok) {
-                        const fullData = await detailResponse.json();
-                        saveFavoriteSummary(currentDate, type, fullData);
-                    }
-                } catch (e) { }
-            }
-
-            if (typeof clearDateCache === 'function') clearDateCache();
-        } catch (err) {
-            console.error('收藏更新失败', err);
+        // 成功时保存摘要（若新收藏）
+        if (!isLiked) {
+            try {
+                const detailResponse = await fetch(`${API_BASE}/api/posts/${currentDate}`);
+                if (detailResponse.ok) {
+                    const fullData = await detailResponse.json();
+                    saveFavoriteSummary(currentDate, type, fullData);
+                }
+            } catch (e) { }
         }
-    } else if (isShare) {
+    } catch (err) {
+        console.error('收藏更新失败', err);
+        // 回滚 UI 和本地存储
+        icon.classList.remove(newIconClass);
+        icon.classList.add(isLiked ? 'ri-heart-2-fill' : 'ri-heart-2-line');
+        if (isLiked) {
+            localStorage.setItem(key, 'true');
+            // 可选：尝试恢复摘要
+        } else {
+            localStorage.removeItem(key);
+            removeFavoriteSummary(currentDate, type);
+        }
+        // 可选：显示错误提示
+        showToast('操作失败，请稍后重试');
+    }
+} else if (isShare) {
         try {
             const response = await fetch(`${API_BASE}/api/posts/${currentDate}/stats/${type}/share`, {
                 method: 'POST',
@@ -1586,6 +1624,30 @@ if (changelogModal) {
 }
 
 // ========== 跨标签页数据同步（监听后台更新） ==========
+// 新增：获取并更新侧边栏版本号
+async function fetchAndUpdateVersion() {
+    try {
+        const res = await fetch(`${API_BASE}/api/changelogs`);
+        const logs = await res.json();
+        const versionSpan = document.querySelector('.version');
+        if (!versionSpan) return;
+
+        if (!Array.isArray(logs) || logs.length === 0) {
+            versionSpan.textContent = 'V0.0.1';
+            return;
+        }
+
+        // 按日期降序排序，取最新一条的版本号
+        const sorted = [...logs].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+        const latestVersion = sorted[0]?.version;
+        versionSpan.textContent = latestVersion ? `V${latestVersion}` : 'V0.0.1';
+    } catch (err) {
+        console.warn('获取最新版本失败', err);
+        // 出错时不覆盖原有显示
+    }
+}
+
+// 原有 storage 监听，添加版本刷新
 function handleStorageChange(e) {
     if (e.key === 'admin_data_updated' && e.newValue) {
         console.log('检测到管理后台内容更新，刷新当前页面数据');
@@ -1595,8 +1657,11 @@ function handleStorageChange(e) {
         if (typeof clearDateCache === 'function') {
             clearDateCache();
         }
+        // 新增：同步更新侧边栏版本号
+        fetchAndUpdateVersion();
     }
 }
+
 window.addEventListener('storage', handleStorageChange);
 
 // 页面可见性变化时刷新
@@ -1618,6 +1683,404 @@ window.addEventListener('popstate', (event) => {
         });
     }
 });
+
+// ========== 跟手滑动模块 ==========
+// 该模块实现真正的跟随手指滑动切换，替代原有的 swipe 检测逻辑
+let dragState = {
+        active: false,
+        startX: 0,
+        startY: 0,          // 新增：记录起始 Y 坐标
+        currentX: 0,
+        startTime: 0,
+        startIndex: 0,
+        containerWidth: 0,
+        cards: [],
+        baseTransforms: [],
+        currentOffset: 0,
+        isDragging: false
+    };
+
+function initDragSwipe() {
+    // 获取卡片容器
+    const cardContainer = document.querySelector('.card-container');
+    if (!cardContainer) return;
+    
+    // 获取所有卡片
+    const allCards = document.querySelectorAll('.card');
+    if (!allCards.length) return;
+    
+    // 标记是否正在拖拽回弹/切换动画中，避免干扰
+    let isSettling = false;
+    
+    // 获取容器宽度
+    function getContainerWidth() {
+        return cardContainer.clientWidth;
+    }
+    
+    // 计算每个卡片的基准偏移量（基于当前索引布局）
+    // 基准：当前卡片偏移0，左侧卡片偏移 -width，右侧卡片偏移 +width
+    function updateBaseTransforms(width, activeIndex) {
+        dragState.baseTransforms = [];
+        for (let i = 0; i < allCards.length; i++) {
+            if (i === activeIndex) {
+                dragState.baseTransforms.push(0);
+            } else if (i < activeIndex) {
+                dragState.baseTransforms.push(-width);
+            } else {
+                dragState.baseTransforms.push(width);
+            }
+        }
+    }
+    
+    // 应用所有卡片的 transform（基准 + 当前偏移），并控制透明度/层级，仅显示当前卡片和目标卡片
+    function applyTransform(offsetX) {
+        const direction = offsetX > 0 ? 'right' : (offsetX < 0 ? 'left' : null);
+        const progress = Math.min(1, Math.abs(offsetX) / dragState.containerWidth);
+        
+        for (let i = 0; i < allCards.length; i++) {
+            const card = allCards[i];
+            const base = dragState.baseTransforms[i];
+            const newX = base + offsetX;
+            card.style.transform = `translateX(${newX}px)`;
+            
+            let opacity = 0;
+            let zIndex = 1;
+            
+            // 当前卡片始终完全可见
+            if (i === dragState.startIndex) {
+                opacity = 1;
+                zIndex = 3;
+            } 
+            // 向右滑动（查看前一个卡片），显示左侧相邻卡片，透明度随滑动距离增加
+            else if (direction === 'right' && i === dragState.startIndex - 1) {
+                opacity = progress;
+                zIndex = 2;
+            } 
+            // 向左滑动（查看后一个卡片），显示右侧相邻卡片，透明度随滑动距离增加
+            else if (direction === 'left' && i === dragState.startIndex + 1) {
+                opacity = progress;
+                zIndex = 2;
+            } 
+            // 其他卡片完全透明且层级最低
+            else {
+                opacity = 0;
+                zIndex = 1;
+            }
+            
+            card.style.opacity = opacity;
+            card.style.zIndex = zIndex;
+            // 拖拽过程中禁止所有卡片点击，防止干扰，最终由 setCardsPosition 恢复
+            card.style.pointerEvents = 'none';
+        }
+    }
+    
+    // 重置卡片到基准位置（无动画）
+    function resetToBase() {
+        for (let i = 0; i < allCards.length; i++) {
+            const card = allCards[i];
+            const base = dragState.baseTransforms[i];
+            card.style.transform = `translateX(${base}px)`;
+            card.style.transition = '';
+            if (i === dragState.startIndex) {
+                card.style.opacity = '1';
+                card.style.zIndex = '2';
+            } else {
+                card.style.opacity = '0';
+                card.style.zIndex = '1';
+            }
+        }
+    }
+    
+    // 执行最终切换（带动画）
+    function performSwitch(newIndex, shouldAnimate = true) {
+        if (newIndex === dragState.startIndex) {
+            // 回弹到原位
+            if (shouldAnimate) {
+                for (let i = 0; i < allCards.length; i++) {
+                    allCards[i].style.transition = 'transform 0.3s cubic-bezier(0.2, 0.9, 0.4, 1.1), opacity 0.3s ease';
+                }
+                applyTransform(0);
+                setTimeout(() => {
+                    for (let i = 0; i < allCards.length; i++) {
+                        allCards[i].style.transition = '';
+                    }
+                    // 确保最终状态正确
+                    setCardsPosition(dragState.startIndex);
+                }, 350);
+            } else {
+                resetToBase();
+                setCardsPosition(dragState.startIndex);
+            }
+            return;
+        }
+        
+        // 切换索引
+        if (shouldAnimate) {
+            // 先设置目标索引的基准
+            const targetWidth = dragState.containerWidth;
+            const direction = newIndex > dragState.startIndex ? 1 : -1;
+            // 临时设置所有卡片 transition
+            for (let i = 0; i < allCards.length; i++) {
+                allCards[i].style.transition = 'transform 0.3s cubic-bezier(0.2, 0.9, 0.4, 1.1), opacity 0.3s ease';
+            }
+            // 更新基准偏移
+            updateBaseTransforms(targetWidth, newIndex);
+            // 设置当前偏移为反方向（让新卡片从边缘进入）
+            const startOffset = direction === 1 ? targetWidth : -targetWidth;
+            for (let i = 0; i < allCards.length; i++) {
+                const card = allCards[i];
+                const base = dragState.baseTransforms[i];
+                card.style.transform = `translateX(${base + startOffset}px)`;
+                if (i === newIndex) {
+                    card.style.opacity = '1';
+                } else {
+                    card.style.opacity = '0';
+                }
+            }
+            // 强制重绘
+            void allCards[0].offsetHeight;
+            // 动画到目标位置
+            for (let i = 0; i < allCards.length; i++) {
+                const card = allCards[i];
+                const base = dragState.baseTransforms[i];
+                card.style.transform = `translateX(${base}px)`;
+                if (i === newIndex) {
+                    card.style.opacity = '1';
+                } else {
+                    card.style.opacity = '0';
+                }
+            }
+            setTimeout(() => {
+                for (let i = 0; i < allCards.length; i++) {
+                    allCards[i].style.transition = '';
+                }
+                // 更新全局索引
+                currentIndex = newIndex;
+                // 同步导航栏高亮
+                const targetId = tabOrder[newIndex];
+                navItems.forEach(item => item.classList.remove('active'));
+                document.querySelector(`[data-target="${targetId}"]`).classList.add('active');
+                localStorage.setItem(STATE_KEY, targetId);
+                updateHighlight();
+                // 确保最终布局正确
+                setCardsPosition(newIndex);
+            }, 350);
+        } else {
+            currentIndex = newIndex;
+            setCardsPosition(newIndex);
+            const targetId = tabOrder[newIndex];
+            navItems.forEach(item => item.classList.remove('active'));
+            document.querySelector(`[data-target="${targetId}"]`).classList.add('active');
+            updateHighlight();
+        }
+    }
+    
+    // 处理边界日期切换（最左向右滑或最右向左滑）
+    async function handleBoundarySwitch(direction, offsetRatio) {
+        // direction: 'right' 表示向右滑动（查看更早内容），'left' 表示向左滑动（查看更新内容）
+        await fetchPublishedDatesList();
+        let targetDate = null;
+        let targetCardType = null;
+        
+        if (direction === 'right' && currentIndex === 0) {
+            // 最左向右滑动：切换到上一日期的文章卡片
+            targetDate = getNextPublishedDate(currentDate);
+            targetCardType = 'article';
+        } else if (direction === 'left' && currentIndex === tabOrder.length - 1) {
+            // 最右向左滑动：切换到下一日期的音乐卡片
+            targetDate = getPrevPublishedDate(currentDate);
+            targetCardType = 'music';
+        }
+        
+        if (targetDate && targetCardType) {
+            isSettling = true;
+            // 先回弹到原位（无动画）
+            for (let i = 0; i < allCards.length; i++) {
+                allCards[i].style.transition = '';
+            }
+            resetToBase();
+            // 执行日期切换
+            await switchToDate(targetDate, targetCardType);
+            // 等待切换完成后重置拖拽状态
+            setTimeout(() => {
+                isSettling = false;
+                dragState.active = false;
+            }, 400);
+        } else {
+            // 无更多内容，简单回弹
+            performSwitch(dragState.startIndex, true);
+            if (direction === 'right' && currentIndex === 0) {
+                showToast('没有最新的内容了');
+            } else if (direction === 'left' && currentIndex === tabOrder.length - 1) {
+                showToast('没有更早的内容了');
+            }
+            setTimeout(() => {
+                isSettling = false;
+                dragState.active = false;
+            }, 350);
+        }
+    }
+    
+    // 触摸开始
+    function onTouchStart(e) {
+        if (isSettling || isAnimating || isDateSwitching) return;
+        const touch = e.touches[0];
+        dragState.active = true;
+        dragState.startX = touch.clientX;
+        dragState.startY = touch.clientY;   // 记录起始 Y
+        dragState.currentX = touch.clientX;
+        dragState.startTime = Date.now();
+        dragState.startIndex = currentIndex;
+        dragState.containerWidth = getContainerWidth();
+        dragState.currentOffset = 0;
+        dragState.isDragging = false;
+        
+        // 禁用所有卡片过渡动画
+        for (let i = 0; i < allCards.length; i++) {
+            allCards[i].style.transition = 'none';
+        }
+        
+        // 更新基准偏移
+        updateBaseTransforms(dragState.containerWidth, currentIndex);
+        // 确保卡片位置正确
+        for (let i = 0; i < allCards.length; i++) {
+            const card = allCards[i];
+            const base = dragState.baseTransforms[i];
+            card.style.transform = `translateX(${base}px)`;
+            if (i === currentIndex) {
+                card.style.opacity = '1';
+                card.style.zIndex = '2';
+            } else {
+                card.style.opacity = '0';
+                card.style.zIndex = '1';
+            }
+        }
+    }
+    
+    // 触摸移动
+    function onTouchMove(e) {
+        if (!dragState.active || isSettling) return;
+        const touch = e.touches[0];
+        const deltaX = touch.clientX - dragState.startX;
+        const deltaY = touch.clientY - dragState.startY;
+        
+        // 判断滑动方向：如果水平偏移大于垂直偏移且超过阈值，认为是水平滑动，阻止默认行为
+        if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 5) {
+            dragState.isDragging = true;
+            e.preventDefault();
+        } else if (Math.abs(deltaY) > 5) {
+            // 垂直滚动，放弃拖拽，让页面正常滚动
+            dragState.active = false;
+            // 重置卡片位置
+            for (let i = 0; i < allCards.length; i++) {
+                allCards[i].style.transition = '';
+                const base = dragState.baseTransforms[i];
+                allCards[i].style.transform = `translateX(${base}px)`;
+                if (i === dragState.startIndex) {
+                    allCards[i].style.opacity = '1';
+                    allCards[i].style.zIndex = '2';
+                } else {
+                    allCards[i].style.opacity = '0';
+                    allCards[i].style.zIndex = '1';
+                }
+            }
+            return;
+        }
+        
+        if (!dragState.isDragging) return;
+        
+        dragState.currentX = touch.clientX;
+        let newOffset = deltaX;
+        
+        // 边界阻尼效果
+        const isAtLeftEdge = (dragState.startIndex === 0 && newOffset > 0);
+        const isAtRightEdge = (dragState.startIndex === tabOrder.length - 1 && newOffset < 0);
+        
+        if (isAtLeftEdge) {
+            newOffset = Math.min(newOffset, dragState.containerWidth * 0.25);
+            newOffset = newOffset * 0.6;
+        } else if (isAtRightEdge) {
+            newOffset = Math.max(newOffset, -dragState.containerWidth * 0.25);
+            newOffset = newOffset * 0.6;
+        } else {
+            const maxOffset = dragState.containerWidth;
+            newOffset = Math.min(maxOffset, Math.max(-maxOffset, newOffset));
+        }
+        
+        dragState.currentOffset = newOffset;
+        applyTransform(newOffset);
+    }
+    
+    // 触摸结束
+    async function onTouchEnd(e) {
+        if (!dragState.active || isSettling) {
+            dragState.active = false;
+            return;
+        }
+        
+        const deltaX = dragState.currentX - dragState.startX;
+        const deltaTime = Date.now() - dragState.startTime;
+        const velocity = Math.abs(deltaX) / deltaTime;
+        const threshold = dragState.containerWidth * 0.25; // 切换阈值（宽度的25%）
+        const isFastSwipe = velocity > 0.5; // 快速滑动
+        
+        let shouldSwitch = false;
+        let switchDirection = 0; // -1: 左滑（下一张），1: 右滑（上一张）
+        
+        if (Math.abs(deltaX) > threshold || isFastSwipe) {
+            if (deltaX > 0 && dragState.startIndex > 0) {
+                // 向右滑动，切换到上一张
+                shouldSwitch = true;
+                switchDirection = -1;
+            } else if (deltaX < 0 && dragState.startIndex < tabOrder.length - 1) {
+                // 向左滑动，切换到下一张
+                shouldSwitch = true;
+                switchDirection = 1;
+            } else if (deltaX > 0 && dragState.startIndex === 0) {
+                // 最右边界向右滑动：触发日期切换（更早内容）
+                dragState.active = false;
+                await handleBoundarySwitch('right', Math.abs(deltaX) / dragState.containerWidth);
+                return;
+            } else if (deltaX < 0 && dragState.startIndex === tabOrder.length - 1) {
+                // 最左边界向左滑动：触发日期切换（更新内容）
+                dragState.active = false;
+                await handleBoundarySwitch('left', Math.abs(deltaX) / dragState.containerWidth);
+                return;
+            }
+        }
+        
+        if (shouldSwitch && switchDirection !== 0) {
+            const newIndex = dragState.startIndex + switchDirection;
+            if (newIndex >= 0 && newIndex < tabOrder.length) {
+                isSettling = true;
+                performSwitch(newIndex, true);
+                setTimeout(() => {
+                    isSettling = false;
+                    dragState.active = false;
+                }, 400);
+            } else {
+                performSwitch(dragState.startIndex, true);
+                dragState.active = false;
+            }
+        } else {
+            // 回弹
+            performSwitch(dragState.startIndex, true);
+            dragState.active = false;
+        }
+    }
+    
+    // 绑定事件
+    cardContainer.addEventListener('touchstart', onTouchStart, { passive: false });
+    cardContainer.addEventListener('touchmove', onTouchMove, { passive: false });
+    cardContainer.addEventListener('touchend', onTouchEnd);
+    cardContainer.addEventListener('touchcancel', onTouchEnd);
+    
+    // 暴露重置方法供外部调用（例如日期切换后需要同步）
+    window.resetDragState = function() {
+        dragState.active = false;
+        isSettling = false;
+    };
+}
 
 // ========== 初始化 ==========
 document.addEventListener('DOMContentLoaded', async () => {
@@ -1649,6 +2112,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     resetPageContentTransform();
     bindContactUsCopy();
     bindVersionClick();
+    await fetchAndUpdateVersion();
     window.addEventListener('load', () => {
         updateHighlight();
         updateCardVerticalPosition();
@@ -1658,13 +2122,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     let initialDate = getDateFromUrl();
 
     if (!initialDate) {
-        // URL 无参数，尝试获取最新发布日期
         initialDate = await getLatestPublishedDate();
         if (!initialDate) {
-            // 最终回退到本地当前日期
             initialDate = getLocalToday();
         }
-        // 更新 URL 但不触发重新加载，便于分享
         const newUrl = `?date=${initialDate}`;
         window.history.replaceState({ date: initialDate }, '', newUrl);
     }
@@ -1672,9 +2133,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 加载初始日期内容
     displayDateInNav(initialDate);
     await loadDataForDate(initialDate);
-    // 确保高亮和卡片位置正确（可能因内容加载触发重排）
+    await fetchPublishedDatesList();
     updateHighlight();
     updateCardVerticalPosition();
+    
+    // 初始化跟手滑动模块（替换原有 swipe 逻辑）
+    // 注意：原有的 cardContainerEl 触摸事件已经被新模块完全替代，不再需要旧的监听器
+    initDragSwipe();
 });
 
 function resetPageContentTransform() {
