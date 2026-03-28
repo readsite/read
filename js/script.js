@@ -420,12 +420,12 @@ function switchTo(newIndex) {
 
     setCardsPosition(newIndex);
     const onTransitionEnd = () => {
-        updateHighlight();
-        updateCardVerticalPosition();
-        isAnimating = false;
-        card.removeEventListener('transitionend', onTransitionEnd);
-    };
-    cards[0].addEventListener('transitionend', onTransitionEnd);
+    updateHighlight();
+    updateCardVerticalPosition();
+    isAnimating = false;
+    cards[0].removeEventListener('transitionend', onTransitionEnd);
+};
+    
     const targetId = tabOrder[newIndex];
     navItems.forEach(item => item.classList.remove('active'));
     document.querySelector(`[data-target="${targetId}"]`).classList.add('active');
@@ -626,7 +626,29 @@ function updatePage(data, date) {
     trackAlbum.textContent = musicTitle;
     trackSinger.textContent = musicArtist;
     document.getElementById('album-img').src = musicCover;
+const albumImg = document.getElementById('album-img');
+// 重置并隐藏
+albumImg.onload = null;
+albumImg.onerror = null;
+albumImg.style.display = 'none';
 
+if (musicCover) {
+    albumImg.onload = () => {
+        albumImg.style.display = 'block';
+    };
+    albumImg.onerror = () => {
+        albumImg.style.display = 'none';
+        // 可选：设置默认占位图（若需要可取消注释）
+        // albumImg.src = 'img/default-cover.png';
+    };
+    albumImg.src = musicCover;
+    // 如果图片已缓存，立即显示
+    if (albumImg.complete) {
+        albumImg.onload();
+    }
+} else {
+    albumImg.style.display = 'none';
+}
     if (musicSrc) {
         audioManager.getOrCreate(date, musicSrc, musicTitle, musicArtist, musicCover);
     } else {
@@ -1701,24 +1723,30 @@ let dragState = {
     };
 
 function initDragSwipe() {
-    // 获取卡片容器
     const cardContainer = document.querySelector('.card-container');
     if (!cardContainer) return;
-    
-    // 获取所有卡片
+
     const allCards = document.querySelectorAll('.card');
     if (!allCards.length) return;
-    
-    // 标记是否正在拖拽回弹/切换动画中，避免干扰
-    let isSettling = false;
-    
-    // 获取容器宽度
+
+    let isSettling = false;  // 防止动画未完成时重复拖拽
+    let dragState = {
+        active: false,
+        startX: 0,
+        startY: 0,
+        currentX: 0,
+        startTime: 0,
+        startIndex: 0,
+        containerWidth: 0,
+        baseTransforms: [],
+        currentOffset: 0,
+        isDragging: false
+    };
+
     function getContainerWidth() {
         return cardContainer.clientWidth;
     }
-    
-    // 计算每个卡片的基准偏移量（基于当前索引布局）
-    // 基准：当前卡片偏移0，左侧卡片偏移 -width，右侧卡片偏移 +width
+
     function updateBaseTransforms(width, activeIndex) {
         dragState.baseTransforms = [];
         for (let i = 0; i < allCards.length; i++) {
@@ -1731,50 +1759,40 @@ function initDragSwipe() {
             }
         }
     }
-    
-    // 应用所有卡片的 transform（基准 + 当前偏移），并控制透明度/层级，仅显示当前卡片和目标卡片
+
     function applyTransform(offsetX) {
         const direction = offsetX > 0 ? 'right' : (offsetX < 0 ? 'left' : null);
         const progress = Math.min(1, Math.abs(offsetX) / dragState.containerWidth);
-        
+
         for (let i = 0; i < allCards.length; i++) {
             const card = allCards[i];
             const base = dragState.baseTransforms[i];
             const newX = base + offsetX;
             card.style.transform = `translateX(${newX}px)`;
-            
+
             let opacity = 0;
             let zIndex = 1;
-            
-            // 当前卡片始终完全可见
+
             if (i === dragState.startIndex) {
                 opacity = 1;
                 zIndex = 3;
-            } 
-            // 向右滑动（查看前一个卡片），显示左侧相邻卡片，透明度随滑动距离增加
-            else if (direction === 'right' && i === dragState.startIndex - 1) {
+            } else if (direction === 'right' && i === dragState.startIndex - 1) {
                 opacity = progress;
                 zIndex = 2;
-            } 
-            // 向左滑动（查看后一个卡片），显示右侧相邻卡片，透明度随滑动距离增加
-            else if (direction === 'left' && i === dragState.startIndex + 1) {
+            } else if (direction === 'left' && i === dragState.startIndex + 1) {
                 opacity = progress;
                 zIndex = 2;
-            } 
-            // 其他卡片完全透明且层级最低
-            else {
+            } else {
                 opacity = 0;
                 zIndex = 1;
             }
-            
+
             card.style.opacity = opacity;
             card.style.zIndex = zIndex;
-            // 拖拽过程中禁止所有卡片点击，防止干扰，最终由 setCardsPosition 恢复
             card.style.pointerEvents = 'none';
         }
     }
-    
-    // 重置卡片到基准位置（无动画）
+
     function resetToBase() {
         for (let i = 0; i < allCards.length; i++) {
             const card = allCards[i];
@@ -1790,11 +1808,9 @@ function initDragSwipe() {
             }
         }
     }
-    
-    // 执行最终切换（带动画）
+
     function performSwitch(newIndex, shouldAnimate = true) {
         if (newIndex === dragState.startIndex) {
-            // 回弹到原位
             if (shouldAnimate) {
                 for (let i = 0; i < allCards.length; i++) {
                     allCards[i].style.transition = 'transform 0.3s cubic-bezier(0.2, 0.9, 0.4, 1.1), opacity 0.3s ease';
@@ -1804,7 +1820,6 @@ function initDragSwipe() {
                     for (let i = 0; i < allCards.length; i++) {
                         allCards[i].style.transition = '';
                     }
-                    // 确保最终状态正确
                     setCardsPosition(dragState.startIndex);
                 }, 350);
             } else {
@@ -1813,19 +1828,14 @@ function initDragSwipe() {
             }
             return;
         }
-        
-        // 切换索引
+
         if (shouldAnimate) {
-            // 先设置目标索引的基准
             const targetWidth = dragState.containerWidth;
             const direction = newIndex > dragState.startIndex ? 1 : -1;
-            // 临时设置所有卡片 transition
             for (let i = 0; i < allCards.length; i++) {
                 allCards[i].style.transition = 'transform 0.3s cubic-bezier(0.2, 0.9, 0.4, 1.1), opacity 0.3s ease';
             }
-            // 更新基准偏移
             updateBaseTransforms(targetWidth, newIndex);
-            // 设置当前偏移为反方向（让新卡片从边缘进入）
             const startOffset = direction === 1 ? targetWidth : -targetWidth;
             for (let i = 0; i < allCards.length; i++) {
                 const card = allCards[i];
@@ -1837,9 +1847,7 @@ function initDragSwipe() {
                     card.style.opacity = '0';
                 }
             }
-            // 强制重绘
             void allCards[0].offsetHeight;
-            // 动画到目标位置
             for (let i = 0; i < allCards.length; i++) {
                 const card = allCards[i];
                 const base = dragState.baseTransforms[i];
@@ -1854,15 +1862,12 @@ function initDragSwipe() {
                 for (let i = 0; i < allCards.length; i++) {
                     allCards[i].style.transition = '';
                 }
-                // 更新全局索引
                 currentIndex = newIndex;
-                // 同步导航栏高亮
                 const targetId = tabOrder[newIndex];
                 navItems.forEach(item => item.classList.remove('active'));
                 document.querySelector(`[data-target="${targetId}"]`).classList.add('active');
                 localStorage.setItem(STATE_KEY, targetId);
                 updateHighlight();
-                // 确保最终布局正确
                 setCardsPosition(newIndex);
             }, 350);
         } else {
@@ -1874,40 +1879,32 @@ function initDragSwipe() {
             updateHighlight();
         }
     }
-    
-    // 处理边界日期切换（最左向右滑或最右向左滑）
+
     async function handleBoundarySwitch(direction, offsetRatio) {
-        // direction: 'right' 表示向右滑动（查看更早内容），'left' 表示向左滑动（查看更新内容）
         await fetchPublishedDatesList();
         let targetDate = null;
         let targetCardType = null;
-        
+
         if (direction === 'right' && currentIndex === 0) {
-            // 最左向右滑动：切换到上一日期的文章卡片
             targetDate = getNextPublishedDate(currentDate);
             targetCardType = 'article';
         } else if (direction === 'left' && currentIndex === tabOrder.length - 1) {
-            // 最右向左滑动：切换到下一日期的音乐卡片
             targetDate = getPrevPublishedDate(currentDate);
             targetCardType = 'music';
         }
-        
+
         if (targetDate && targetCardType) {
             isSettling = true;
-            // 先回弹到原位（无动画）
             for (let i = 0; i < allCards.length; i++) {
                 allCards[i].style.transition = '';
             }
             resetToBase();
-            // 执行日期切换
             await switchToDate(targetDate, targetCardType);
-            // 等待切换完成后重置拖拽状态
             setTimeout(() => {
                 isSettling = false;
                 dragState.active = false;
             }, 400);
         } else {
-            // 无更多内容，简单回弹
             performSwitch(dragState.startIndex, true);
             if (direction === 'right' && currentIndex === 0) {
                 showToast('没有最新的内容了');
@@ -1920,29 +1917,51 @@ function initDragSwipe() {
             }, 350);
         }
     }
-    
-    // 触摸开始
+
+    // ---------- 新增：排除可交互元素 ----------
+    function shouldIgnoreTouch(target) {
+        // 模态框打开时禁用拖拽
+        if (document.body.classList.contains('favorites-open') ||
+            document.body.classList.contains('sidebar-open') ||
+            document.body.classList.contains('timeline-open') ||
+            document.body.classList.contains('changelog-open')) {
+            return true;
+        }
+        // 排除所有需要点击交互的元素
+        const interactiveSelectors = [
+            '.favorite-btn',
+            '.share-btn',
+            '.play-pause-icon',
+            '.progress-bar',
+            '.stats-actions button',
+            '.album-image'
+        ];
+        return target.closest(interactiveSelectors.join(','));
+    }
+    // ----------------------------------------
+
     function onTouchStart(e) {
         if (isSettling || isAnimating || isDateSwitching) return;
+
+        // 如果触摸起点在可交互元素上，不启动拖拽
+        if (shouldIgnoreTouch(e.target)) return;
+
         const touch = e.touches[0];
         dragState.active = true;
         dragState.startX = touch.clientX;
-        dragState.startY = touch.clientY;   // 记录起始 Y
+        dragState.startY = touch.clientY;
         dragState.currentX = touch.clientX;
         dragState.startTime = Date.now();
         dragState.startIndex = currentIndex;
         dragState.containerWidth = getContainerWidth();
         dragState.currentOffset = 0;
         dragState.isDragging = false;
-        
-        // 禁用所有卡片过渡动画
+
         for (let i = 0; i < allCards.length; i++) {
             allCards[i].style.transition = 'none';
         }
-        
-        // 更新基准偏移
+
         updateBaseTransforms(dragState.containerWidth, currentIndex);
-        // 确保卡片位置正确
         for (let i = 0; i < allCards.length; i++) {
             const card = allCards[i];
             const base = dragState.baseTransforms[i];
@@ -1956,22 +1975,18 @@ function initDragSwipe() {
             }
         }
     }
-    
-    // 触摸移动
+
     function onTouchMove(e) {
         if (!dragState.active || isSettling) return;
         const touch = e.touches[0];
         const deltaX = touch.clientX - dragState.startX;
         const deltaY = touch.clientY - dragState.startY;
-        
-        // 判断滑动方向：如果水平偏移大于垂直偏移且超过阈值，认为是水平滑动，阻止默认行为
+
         if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 5) {
             dragState.isDragging = true;
             e.preventDefault();
         } else if (Math.abs(deltaY) > 5) {
-            // 垂直滚动，放弃拖拽，让页面正常滚动
             dragState.active = false;
-            // 重置卡片位置
             for (let i = 0; i < allCards.length; i++) {
                 allCards[i].style.transition = '';
                 const base = dragState.baseTransforms[i];
@@ -1986,16 +2001,15 @@ function initDragSwipe() {
             }
             return;
         }
-        
+
         if (!dragState.isDragging) return;
-        
+
         dragState.currentX = touch.clientX;
         let newOffset = deltaX;
-        
-        // 边界阻尼效果
+
         const isAtLeftEdge = (dragState.startIndex === 0 && newOffset > 0);
         const isAtRightEdge = (dragState.startIndex === tabOrder.length - 1 && newOffset < 0);
-        
+
         if (isAtLeftEdge) {
             newOffset = Math.min(newOffset, dragState.containerWidth * 0.25);
             newOffset = newOffset * 0.6;
@@ -2006,49 +2020,44 @@ function initDragSwipe() {
             const maxOffset = dragState.containerWidth;
             newOffset = Math.min(maxOffset, Math.max(-maxOffset, newOffset));
         }
-        
+
         dragState.currentOffset = newOffset;
         applyTransform(newOffset);
     }
-    
-    // 触摸结束
+
     async function onTouchEnd(e) {
         if (!dragState.active || isSettling) {
             dragState.active = false;
             return;
         }
-        
+
         const deltaX = dragState.currentX - dragState.startX;
         const deltaTime = Date.now() - dragState.startTime;
         const velocity = Math.abs(deltaX) / deltaTime;
-        const threshold = dragState.containerWidth * 0.25; // 切换阈值（宽度的25%）
-        const isFastSwipe = velocity > 0.5; // 快速滑动
-        
+        const threshold = dragState.containerWidth * 0.25;
+        const isFastSwipe = velocity > 0.5;
+
         let shouldSwitch = false;
-        let switchDirection = 0; // -1: 左滑（下一张），1: 右滑（上一张）
-        
+        let switchDirection = 0;
+
         if (Math.abs(deltaX) > threshold || isFastSwipe) {
             if (deltaX > 0 && dragState.startIndex > 0) {
-                // 向右滑动，切换到上一张
                 shouldSwitch = true;
                 switchDirection = -1;
             } else if (deltaX < 0 && dragState.startIndex < tabOrder.length - 1) {
-                // 向左滑动，切换到下一张
                 shouldSwitch = true;
                 switchDirection = 1;
             } else if (deltaX > 0 && dragState.startIndex === 0) {
-                // 最右边界向右滑动：触发日期切换（更早内容）
                 dragState.active = false;
                 await handleBoundarySwitch('right', Math.abs(deltaX) / dragState.containerWidth);
                 return;
             } else if (deltaX < 0 && dragState.startIndex === tabOrder.length - 1) {
-                // 最左边界向左滑动：触发日期切换（更新内容）
                 dragState.active = false;
                 await handleBoundarySwitch('left', Math.abs(deltaX) / dragState.containerWidth);
                 return;
             }
         }
-        
+
         if (shouldSwitch && switchDirection !== 0) {
             const newIndex = dragState.startIndex + switchDirection;
             if (newIndex >= 0 && newIndex < tabOrder.length) {
@@ -2063,19 +2072,16 @@ function initDragSwipe() {
                 dragState.active = false;
             }
         } else {
-            // 回弹
             performSwitch(dragState.startIndex, true);
             dragState.active = false;
         }
     }
-    
-    // 绑定事件
+
     cardContainer.addEventListener('touchstart', onTouchStart, { passive: false });
     cardContainer.addEventListener('touchmove', onTouchMove, { passive: false });
     cardContainer.addEventListener('touchend', onTouchEnd);
     cardContainer.addEventListener('touchcancel', onTouchEnd);
-    
-    // 暴露重置方法供外部调用（例如日期切换后需要同步）
+
     window.resetDragState = function() {
         dragState.active = false;
         isSettling = false;
@@ -2118,27 +2124,46 @@ document.addEventListener('DOMContentLoaded', async () => {
         updateCardVerticalPosition();
     });
 
-    // --- 确定初始日期 ---
+    // ========== 关键修改：日期确定逻辑 ==========
+    // 获取所有已发布日期（升序）
+    const allDates = await fetchPublishedDatesList();
+
+    if (allDates.length === 0) {
+        // 没有任何发布日期，显示错误提示并停止加载
+        console.error('无法获取任何发布日期，请检查后端接口');
+        showToast('暂无内容，请稍后再试', 3000);
+        return;
+    }
+
+    // 最新日期（升序数组最后一个）
+    const latestDate = allDates[allDates.length - 1];
+
     let initialDate = getDateFromUrl();
 
     if (!initialDate) {
-        initialDate = await getLatestPublishedDate();
-        if (!initialDate) {
-            initialDate = getLocalToday();
-        }
+        // 无 URL 参数，直接使用最新日期
+        initialDate = latestDate;
         const newUrl = `?date=${initialDate}`;
         window.history.replaceState({ date: initialDate }, '', newUrl);
+    } else {
+        // URL 中有日期，验证是否存在
+        if (!allDates.includes(initialDate)) {
+            console.warn(`日期 ${initialDate} 不存在，自动跳转到最新日期 ${latestDate}`);
+            initialDate = latestDate;
+            const newUrl = `?date=${initialDate}`;
+            window.history.replaceState({ date: initialDate }, '', newUrl);
+            showToast(`日期不存在，已为您跳转至最新内容`, 2000);
+        }
     }
 
     // 加载初始日期内容
     displayDateInNav(initialDate);
     await loadDataForDate(initialDate);
-    await fetchPublishedDatesList();
+    await fetchPublishedDatesList(); // 确保日期列表已缓存（无额外开销）
     updateHighlight();
     updateCardVerticalPosition();
-    
-    // 初始化跟手滑动模块（替换原有 swipe 逻辑）
-    // 注意：原有的 cardContainerEl 触摸事件已经被新模块完全替代，不再需要旧的监听器
+
+    // 初始化跟手滑动模块（已包含按钮点击排除逻辑）
     initDragSwipe();
 });
 
