@@ -746,7 +746,7 @@ function updateHighlight() {
     highlight.style.width = `${itemRect.width}px`;
     highlight.style.height = `3px`;
     highlight.style.left = `${itemRect.left - navRect.left}px`;
-    highlight.style.top = `${itemRect.bottom - navRect.top - 3}px`;
+    highlight.style.top = `${itemRect.bottom - navRect.top - 6}px`;
     highlight.style.opacity = '1';
 }
 
@@ -838,70 +838,99 @@ document.addEventListener('click', async (e) => {
     const type = actionsDiv.dataset.type;
     if (!currentDate || !type) return;
 
-if (isFavorite) {
-    const icon = target.querySelector('i');
-    // 动画效果保持不变...
-    const key = `${currentDate}_${type}_favorite`;
-    const isLiked = localStorage.getItem(key) === 'true';
-    const delta = isLiked ? -1 : 1;
+    // 防止重复请求的标志
+    if (target.dataset.pending === 'true') return;
+    target.dataset.pending = 'true';
 
-    // 乐观更新 UI
-    const newIconClass = isLiked ? 'ri-heart-2-line' : 'ri-heart-2-fill';
-    icon.classList.remove(isLiked ? 'ri-heart-2-fill' : 'ri-heart-2-line');
-    icon.classList.add(newIconClass);
-    if (isLiked) {
-        localStorage.removeItem(key);
-        removeFavoriteSummary(currentDate, type);
-    } else {
-        localStorage.setItem(key, 'true');
-        // 保存摘要异步进行，失败不影响主流程
-    }
-
-    try {
-        const response = await fetch(`${API_BASE}/api/posts/${currentDate}/stats/${type}/favorite`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ delta })
-        });
-
-        if (!response.ok) throw new Error('更新失败');
-        const data = await response.json();
-
-        // 更新计数
-        const statsKey = type + 'Stats';
-        const newStats = data[statsKey];
-        if (newStats) {
-            const group = actionsDiv;
-            const favoriteBtn = group.querySelector('.favorite-btn');
-            if (favoriteBtn) favoriteBtn.querySelector('.count').textContent = newStats.favorites;
+    if (isFavorite) {
+        const icon = target.querySelector('i');
+        const countSpan = target.querySelector('.count');
+        if (!icon || !countSpan) {
+            target.dataset.pending = '';
+            return;
         }
 
-        // 成功时保存摘要（若新收藏）
-        if (!isLiked) {
-            try {
-                const detailResponse = await fetch(`${API_BASE}/api/posts/${currentDate}`);
-                if (detailResponse.ok) {
-                    const fullData = await detailResponse.json();
-                    saveFavoriteSummary(currentDate, type, fullData);
-                }
-            } catch (e) { }
-        }
-    } catch (err) {
-        console.error('收藏更新失败', err);
-        // 回滚 UI 和本地存储
-        icon.classList.remove(newIconClass);
-        icon.classList.add(isLiked ? 'ri-heart-2-fill' : 'ri-heart-2-line');
+        // 获取当前计数（整数）
+        let oldCount = parseInt(countSpan.innerText, 10);
+        if (isNaN(oldCount)) oldCount = 0;
+
+        const key = `${currentDate}_${type}_favorite`;
+        const isLiked = localStorage.getItem(key) === 'true';
+        const delta = isLiked ? -1 : 1;
+        const newCount = oldCount + delta;
+
+        // ---------- 乐观更新 UI ----------
+        // 1. 更新心形图标
+        const newIconClass = isLiked ? 'ri-heart-2-line' : 'ri-heart-2-fill';
+        icon.classList.remove(isLiked ? 'ri-heart-2-fill' : 'ri-heart-2-line');
+        icon.classList.add(newIconClass);
+
+        // 2. 更新计数数字
+        countSpan.innerText = newCount;
+
+        // 3. 更新本地存储
         if (isLiked) {
-            localStorage.setItem(key, 'true');
-            // 可选：尝试恢复摘要
-        } else {
             localStorage.removeItem(key);
             removeFavoriteSummary(currentDate, type);
+        } else {
+            localStorage.setItem(key, 'true');
         }
-        // 可选：显示错误提示
-        showToast('操作失败，请稍后重试');
-    }
-} else if (isShare) {
+
+        // 动画
+        icon.classList.add('heart-beat');
+        if (icon._heartBeatTimer) clearTimeout(icon._heartBeatTimer);
+        icon._heartBeatTimer = setTimeout(() => icon.classList.remove('heart-beat'), 400);
+
+        // ---------- 请求后端 ----------
+        try {
+            const response = await fetch(`${API_BASE}/api/posts/${currentDate}/stats/${type}/favorite`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ delta })
+            });
+            if (!response.ok) throw new Error('更新失败');
+            const data = await response.json();
+
+            // 以后端返回的真实计数为准（修正可能的不一致）
+            const statsKey = type + 'Stats';
+            const realStats = data[statsKey];
+            if (realStats && realStats.favorites !== undefined) {
+                countSpan.innerText = realStats.favorites;
+            }
+
+            // 成功时保存摘要（仅新收藏时）
+            if (!isLiked) {
+                try {
+                    const detailResponse = await fetch(`${API_BASE}/api/posts/${currentDate}`);
+                    if (detailResponse.ok) {
+                        const fullData = await detailResponse.json();
+                        saveFavoriteSummary(currentDate, type, fullData);
+                    }
+                } catch (e) { /* 忽略摘要保存失败 */ }
+            }
+        } catch (err) {
+            console.error('收藏更新失败', err);
+            // ---------- 回滚 UI ----------
+            // 回滚心形图标
+            const rollbackIconClass = isLiked ? 'ri-heart-2-fill' : 'ri-heart-2-line';
+            icon.classList.remove(newIconClass);
+            icon.classList.add(rollbackIconClass);
+            // 回滚计数
+            countSpan.innerText = oldCount;
+            // 回滚本地存储
+            if (isLiked) {
+                localStorage.setItem(key, 'true');
+            } else {
+                localStorage.removeItem(key);
+                removeFavoriteSummary(currentDate, type);
+            }
+            showToast('操作失败，请稍后重试');
+        } finally {
+            target.dataset.pending = '';
+        }
+    } else if (isShare) {
+        // 分享的乐观更新（可选）或保持原逻辑
+        // 如果也需要立即更新计数，可参考收藏的乐观更新，此处略
         try {
             const response = await fetch(`${API_BASE}/api/posts/${currentDate}/stats/${type}/share`, {
                 method: 'POST',
@@ -910,7 +939,6 @@ if (isFavorite) {
             });
             if (!response.ok) throw new Error('更新失败');
             const data = await response.json();
-
             const statsKey = type + 'Stats';
             const newStats = data[statsKey];
             if (newStats) {
@@ -2182,7 +2210,227 @@ if ('serviceWorker' in navigator) {
         .then(reg => console.log('SW registered', reg))
         .catch(err => console.error('SW failed', err));
 }
+// ========== 增强分享模块 (完整版) ==========
+(function() {
+    // 获取当前日期（多重保障）
+    function getCurrentDate() {
+        if (window.currentDate) return window.currentDate;
+        if (typeof window.getCurrentDate === 'function') return window.getCurrentDate();
+        // 尝试从 URL 参数获取
+        const urlParams = new URLSearchParams(window.location.search);
+        const dateFromUrl = urlParams.get('date');
+        if (dateFromUrl) return dateFromUrl;
+        return null;
+    }
 
+    // 获取当前页面链接（带日期参数）
+    function getCurrentShareUrl() {
+        let url = window.location.href;
+        const date = getCurrentDate();
+        if (!url.includes('?date=') && date) {
+            const baseUrl = url.split('?')[0];
+            url = `${baseUrl}?date=${date}`;
+        }
+        return url;
+    }
+
+    // 复制链接
+    async function copyLinkToClipboard() {
+        const url = getCurrentShareUrl();
+        try {
+            await navigator.clipboard.writeText(url);
+            return true;
+        } catch (err) {
+            const textarea = document.createElement('textarea');
+            textarea.value = url;
+            document.body.appendChild(textarea);
+            textarea.select();
+            const success = document.execCommand('copy');
+            document.body.removeChild(textarea);
+            return success;
+        }
+    }
+
+    function showMsg(msg, duration = 2000) {
+        if (typeof window.showToast === 'function') {
+            window.showToast(msg, duration);
+        } else {
+            const toast = document.createElement('div');
+            toast.className = 'toast';
+            toast.textContent = msg;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), duration);
+        }
+    }
+
+    // 更新分享计数
+    async function updateShareCount(type, date, delta = 1) {
+        const actionsDiv = document.querySelector(`.stats-actions[data-type="${type}"]`);
+        if (!actionsDiv) return false;
+        const shareBtn = actionsDiv.querySelector('.share-btn');
+        if (!shareBtn) return false;
+        const countSpan = shareBtn.querySelector('.count');
+        if (!countSpan) return false;
+
+        let oldCount = parseInt(countSpan.innerText, 10);
+        if (isNaN(oldCount)) oldCount = 0;
+        const newCount = oldCount + delta;
+        countSpan.innerText = newCount;
+
+        shareBtn.style.transform = 'scale(1.05)';
+        setTimeout(() => { if (shareBtn) shareBtn.style.transform = ''; }, 200);
+
+        try {
+            const response = await fetch(`${window.API_BASE || 'https://solitudenook.top'}/api/posts/${date}/stats/${type}/share`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ delta })
+            });
+            if (!response.ok) throw new Error('更新失败');
+            const data = await response.json();
+            const realStats = data[type + 'Stats'];
+            if (realStats && realStats.shares !== undefined) {
+                countSpan.innerText = realStats.shares;
+            }
+            return true;
+        } catch (err) {
+            console.error('分享计数更新失败', err);
+            countSpan.innerText = oldCount;
+            showMsg('分享失败，请稍后重试');
+            return false;
+        }
+    }
+
+    let isSharingPending = false;
+    async function performShare(action, context) {
+        if (isSharingPending) return;
+        isSharingPending = true;
+
+        const { type, date } = context;
+        let shareSuccess = false;
+        let needToastMsg = '';
+
+        try {
+            if (action === 'copy') {
+                const ok = await copyLinkToClipboard();
+                shareSuccess = ok;
+                needToastMsg = ok ? '链接已复制 ✓' : '复制失败，请手动复制';
+            } else {
+                const ok = await copyLinkToClipboard();
+                shareSuccess = ok;
+                if (action === 'wechat') needToastMsg = ok ? '链接已复制，打开微信粘贴给好友' : '复制失败，请重试';
+                else if (action === 'moments') needToastMsg = ok ? '链接已复制，可分享到微信朋友圈' : '复制失败，请重试';
+                else if (action === 'qq') needToastMsg = ok ? '链接已复制，打开QQ发送给好友' : '复制失败，请重试';
+            }
+
+            if (shareSuccess) {
+                await updateShareCount(type, date, 1);
+                showMsg(needToastMsg, 1800);
+                closeSharePanel();
+            } else {
+                showMsg(needToastMsg || '分享失败', 1500);
+            }
+        } catch (err) {
+            console.error('分享操作异常', err);
+            showMsg('分享失败，请稍后再试');
+        } finally {
+            isSharingPending = false;
+        }
+    }
+
+    let activeShareContext = null;
+    function openSharePanel(type, date) {
+        if (!type || !date) {
+            showMsg('数据加载中，请稍后重试');
+            return;
+        }
+        // 关闭其他模态框
+        if (document.body.classList.contains('favorites-open') && typeof window.closeFavoritesModal === 'function') window.closeFavoritesModal();
+        if (document.body.classList.contains('timeline-open') && typeof window.closeTimelineModal === 'function') window.closeTimelineModal();
+        if (document.body.classList.contains('changelog-open') && typeof window.closeChangelogModal === 'function') window.closeChangelogModal();
+        if (document.body.classList.contains('sidebar-open')) {
+            const closeBtn = document.querySelector('.close-sidebar');
+            if (closeBtn) closeBtn.click();
+        }
+
+        activeShareContext = { type, date };
+        const modal = document.getElementById('shareModal');
+        if (modal) {
+            modal.classList.add('active');
+            document.body.classList.add('share-panel-open');
+        } else {
+            console.warn('未找到分享面板 #shareModal');
+            showMsg('分享功能未加载');
+        }
+    }
+
+    function closeSharePanel() {
+        const modal = document.getElementById('shareModal');
+        if (modal) modal.classList.remove('active');
+        document.body.classList.remove('share-panel-open');
+        activeShareContext = null;
+    }
+
+    function bindShareEvents() {
+        const modal = document.getElementById('shareModal');
+        if (!modal) return;
+
+        const optionsContainer = modal.querySelector('.share-options');
+        if (optionsContainer) {
+            optionsContainer.addEventListener('click', (e) => {
+                const option = e.target.closest('.share-option');
+                if (option && activeShareContext) {
+                    const action = option.getAttribute('data-share-action');
+                    if (action) performShare(action, activeShareContext);
+                }
+            });
+        }
+
+        const overlay = document.getElementById('shareOverlay');
+        if (overlay) overlay.addEventListener('click', closeSharePanel);
+
+        const cancel = document.getElementById('shareCancelBtn');
+        if (cancel) cancel.addEventListener('click', closeSharePanel);
+
+        const panel = modal.querySelector('.share-panel');
+        if (panel) panel.addEventListener('click', (e) => e.stopPropagation());
+    }
+
+    function interceptShareButtons() {
+        document.body.addEventListener('click', (e) => {
+            const shareBtn = e.target.closest('.share-btn');
+            if (!shareBtn) return;
+
+            const actionsDiv = shareBtn.closest('.stats-actions');
+            if (!actionsDiv) return;
+            const type = actionsDiv.getAttribute('data-type');
+            if (!type) return;
+
+            const date = getCurrentDate();
+            if (!date) {
+                showMsg('暂无法分享，请稍后重试');
+                return;
+            }
+
+            e.preventDefault();
+            e.stopPropagation();
+            openSharePanel(type, date);
+        }, true);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+            bindShareEvents();
+            interceptShareButtons();
+        });
+    } else {
+        bindShareEvents();
+        interceptShareButtons();
+    }
+
+    window.openSharePanel = openSharePanel;
+    window.closeSharePanel = closeSharePanel;
+})();
 window.toggleCard = function () { };
 window.hideCard = function () { };
 
