@@ -1,5 +1,5 @@
 // ========== 全局配置 ==========
-const API_BASE = 'https://solitudenook.top/api';
+const API_BASE = 'https://solitudenook.top';
 
 // ========== 全局变量与状态 ==========
 const navItems = document.querySelectorAll('.nav-item');
