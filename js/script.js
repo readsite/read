@@ -31,6 +31,95 @@ const timelineClose = document.querySelector('.close-timeline');
 const timelineTrigger = document.getElementById('timeline-trigger');
 
 let currentDate = '';
+// ========== 网络状态管理 ==========
+let isNetworkAvailable = navigator.onLine;      // 初始同步浏览器状态
+let isShowingOfflinePlaceholder = false;
+const offlinePlaceholder = document.getElementById('offlinePlaceholder');
+
+// 辅助函数：显示/隐藏占位符
+function showOfflinePlaceholder(show) {
+    if (show === isShowingOfflinePlaceholder) return;
+    isShowingOfflinePlaceholder = show;
+    if (offlinePlaceholder) {
+        offlinePlaceholder.style.display = show ? 'flex' : 'none';
+    }
+
+    // 根据网络状态设置 body 类，控制导航栏和日期框的可见性
+    if (show) {
+        document.body.classList.remove('online');
+    } else {
+        document.body.classList.add('online');
+    }
+}
+
+// 核心重试：尝试重新连接并刷新当前页面内容
+async function retryNetworkAndReload() {
+
+    // 如果浏览器报告离线，直接提示并返回
+    if (!navigator.onLine) {
+        showToast('网络未连接，请检查网络设置', 1500);
+        return false;
+    }
+
+    // 设置超时（5秒），避免请求长时间挂起
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    try {
+        const res = await fetch(`${API_BASE}/api/dates`, {
+            method: 'GET',
+            cache: 'no-store',
+            signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!res.ok) throw new Error('网络请求失败');
+        
+        // 重新获取日期列表（强制刷新缓存）
+        publishedDates = [];          // 清空旧缓存
+        isDateListLoading = false;    // 重置加载锁
+        await fetchPublishedDatesList(); // 重新拉取
+
+        // 成功：网络恢复
+        isNetworkAvailable = true;
+        showOfflinePlaceholder(false);
+        
+        const urlDate = getDateFromUrl();
+        if (urlDate && urlDate !== currentDate) {
+            await switchToDate(urlDate);
+        } else if (currentDate) {
+            // 清除当前日期的缓存，确保拿到最新数据
+            dateDataCache.delete(currentDate);
+            await loadDataForDate(currentDate);
+        } else {
+            // 既无URL日期也无当前日期 → 使用最新发布日期
+            const allDates = await fetchPublishedDatesList();
+            const latestDate = allDates.length ? allDates[allDates.length - 1] : null;
+            if (latestDate) {
+                await switchToDate(latestDate);
+            } else {
+                showToast('暂无内容，请稍后再试', 1500);
+            }
+        }
+        return true;
+    } catch (err) {
+        clearTimeout(timeoutId);
+        console.warn('重试失败', err);
+        // 区分超时和普通错误
+        if (err.name === 'AbortError') {
+            showToast('网络请求超时，请检查网络后重试', 2000);
+        } else {
+            showToast('网络仍未恢复，请稍后再试', 1500);
+        }
+        return false;
+    }
+}
+
+// 统一网络错误处理（在 fetch 失败时调用）
+function handleNetworkError(error) {
+    console.warn('网络请求失败', error);
+    isNetworkAvailable = false;
+    showOfflinePlaceholder(true);
+}
 
 // ========== 新增：日期列表与日期切换相关 ==========
 let publishedDates = [];          // 升序排列的日期数组（从旧到新）
@@ -57,9 +146,14 @@ async function fetchPublishedDatesList() {
         if (!res.ok) throw new Error('获取日期列表失败');
         const dates = await res.json();
         publishedDates = Array.isArray(dates) ? dates : [];
+        isNetworkAvailable = true;          // 请求成功，网络可用
+        showOfflinePlaceholder(false);
+        return publishedDates;
     } catch (err) {
         console.warn('获取日期列表失败，日期切换功能将受限', err);
         publishedDates = [];
+        handleNetworkError(err);            // 触发占位符
+        return [];
     } finally {
         isDateListLoading = false;
     }
@@ -83,32 +177,58 @@ function getNextPublishedDate(currentDate) {
 
 // ========== 增强的日期切换（支持指定目标卡片类型） ==========
 async function switchToDate(date, targetTab = null) {
+      if (!navigator.onLine || !isNetworkAvailable) {
+        showToast('网络连接不可用，无法切换日期', 1500);
+        showOfflinePlaceholder(true);
+        return;
+    }
+    // 防止重复切换
     if (isDateSwitching) return;
+    // 如果切换的日期与当前相同且没有指定目标标签页，只关闭时间轴模态框并返回
     if (date === currentDate && !targetTab) {
         closeTimelineModal();
         return;
     }
+
     isDateSwitching = true;
+
     try {
+        // 如果指定了目标标签页（音乐/句子/文章），先切换到对应卡片
         if (targetTab) {
             const targetIndex = getIndexFromId(targetTab);
             if (targetIndex !== currentIndex) {
                 setCardsPosition(targetIndex);
                 currentIndex = targetIndex;
+
+                // 更新导航栏高亮和活动状态
                 navItems.forEach(item => item.classList.remove('active'));
-                document.querySelector(`[data-target="${targetTab}"]`).classList.add('active');
+                const targetNavItem = document.querySelector(`[data-target="${targetTab}"]`);
+                if (targetNavItem) targetNavItem.classList.add('active');
+
                 updateHighlight();
                 localStorage.setItem(STATE_KEY, targetTab);
             }
         }
+
+        // 加载新日期的数据（如果缓存中有则直接显示，否则请求后端）
         await loadDataForDate(date);
+
+        // 关闭时间轴模态框（如果打开的话）
         closeTimelineModal();
+
+        // 更新 URL 中的日期参数，方便分享和浏览器前进后退
         const newUrl = `?date=${date}`;
         window.history.pushState({ date }, '', newUrl);
     } catch (err) {
         console.warn('日期切换失败', err);
+        // 可在此处添加用户提示，如 showToast('切换失败，请稍后重试');
     } finally {
         isDateSwitching = false;
+
+        // 关键修复：重置拖拽模块内部状态，避免在日期切换后无法滑动
+        if (typeof window.resetDragModule === 'function') {
+            window.resetDragModule();
+        }
     }
 }
 
@@ -190,21 +310,22 @@ class AudioManager {
         }
     }
 
-    stop(date) {
-        const player = this.players.get(date);
-        if (player) {
-            player.audio.pause();
-            player.audio.currentTime = 0;
-            player.playing = false;
-            player.currentTime = 0;
-            if (this.currentPlayingDate === date) {
-                this.currentPlayingDate = null;
-            }
-            if (date === currentDisplayDate) {
-                this.updateUIForDate(date);
-            }
+stop(date) {
+    const player = this.players.get(date);
+    if (player) {
+        player.audio.pause();
+        player.audio.currentTime = 0;
+        player.audio.load();              // 强制重置音频内部状态，确保进度归零
+        player.playing = false;
+        player.currentTime = 0;
+        if (this.currentPlayingDate === date) {
+            this.currentPlayingDate = null;
+        }
+        if (date === currentDisplayDate) {
+            this.updateUIForDate(date);
         }
     }
+}
 
     stopAllExcept(exceptDate) {
         for (let [date, player] of this.players.entries()) {
@@ -521,11 +642,14 @@ async function loadDataForDate(date) {
         updateCardVerticalPosition();
         displayDateInNav(date);
         audioManager.updateUIForDate(date);
+        isNetworkAvailable = true;
+        showOfflinePlaceholder(false);
     } catch (e) {
         console.log('No data for this date, clearing content.');
         updatePage({}, date);
         updateCardVerticalPosition();
         audioManager.updateUIForDate(date);
+        handleNetworkError(e);               // 触发占位符
     }
 }
 
@@ -743,7 +867,7 @@ function updateHighlight() {
     highlight.style.width = `${itemRect.width}px`;
     highlight.style.height = `3px`;
     highlight.style.left = `${itemRect.left - navRect.left}px`;
-    highlight.style.top = `${itemRect.bottom - navRect.top - 6}px`;
+    highlight.style.top = `${itemRect.bottom - navRect.top + 1}px`;
     highlight.style.opacity = '1';
 }
 
@@ -757,6 +881,9 @@ navItems.forEach(item => {
 
 let resizeTimer;
 window.addEventListener('resize', () => {
+  if (window.plus && plus.navigator) {
+        setStatusBarStyle();
+    }
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
         updateHighlight();
@@ -764,7 +891,16 @@ window.addEventListener('resize', () => {
     }, 300);
 });
 
+function setStatusBarStyleForSidebarOpen() {
+    if (!window.plus || !plus.navigator) return;
+    const isDarkMode = document.body.classList.contains('dark-mode');
+    const style = isDarkMode ? 'light' : 'dark';
+    plus.navigator.setStatusBarStyle(style);
+}
 function openSidebar() {
+    // 根据当前主题正确设置状态栏颜色
+    setStatusBarStyleForSidebarOpen();
+    
     document.body.classList.add('sidebar-open');
     sidebar.classList.add('open');
     overlay.classList.add('active');
@@ -780,6 +916,9 @@ function closeSidebar() {
     sidebar.classList.remove('open');
     overlay.classList.remove('active');
 
+    // 恢复页面主题对应的状态栏样式
+    setStatusBarStyle();
+    
     adjustFixedElements(false);
     updateCardVerticalPosition();
 }
@@ -1295,9 +1434,19 @@ function handleCardNavigation(e) {
 
 async function executeDeleteFavorite(swipeContainer, date, type) {
     if (!swipeContainer) return;
+
     const deleteBtn = swipeContainer.querySelector('.delete-btn-area');
     if (deleteBtn) deleteBtn.style.pointerEvents = 'none';
 
+    // 检测网络状态
+    if (!navigator.onLine || !isNetworkAvailable) {
+        // 离线状态下直接执行本地删除，不同步后端
+        await performLocalDelete(swipeContainer, date, type);
+        if (deleteBtn) deleteBtn.style.pointerEvents = '';
+        return;
+    }
+
+    // 在线状态：发起后端请求
     try {
         const response = await fetch(`${API_BASE}/api/posts/${date}/stats/${type}/favorite`, {
             method: 'POST',
@@ -1360,7 +1509,67 @@ async function executeDeleteFavorite(swipeContainer, date, type) {
         if (deleteBtn) deleteBtn.style.pointerEvents = '';
     }
 }
+async function performLocalDelete(swipeContainer, date, type) {
+    if (!swipeContainer) return;
 
+    // 1. 移除本地存储的收藏标记
+    const storageKey = `${date}_${type}_favorite`;
+    localStorage.removeItem(storageKey);
+    removeFavoriteSummary(date, type);   // 移除摘要缓存
+
+    // 2. 如果删除的日期正是当前显示的日期，更新页面上的收藏状态和计数
+    if (currentDate === date) {
+        // 更新对应卡片的心形图标和计数（需要先获取当前显示的数据）
+        const actionsDiv = document.querySelector(`.stats-actions[data-type="${type}"]`);
+        if (actionsDiv) {
+            const favBtn = actionsDiv.querySelector('.favorite-btn');
+            const icon = favBtn.querySelector('i');
+            const countSpan = favBtn.querySelector('.count');
+            if (icon) {
+                icon.classList.remove('ri-heart-2-fill');
+                icon.classList.add('ri-heart-2-line');
+            }
+            if (countSpan) {
+                let currentCount = parseInt(countSpan.innerText, 10);
+                if (!isNaN(currentCount)) {
+                    countSpan.innerText = currentCount - 1;
+                }
+            }
+        }
+    }
+
+    // 3. 从收藏页的 DOM 中移除该卡片
+    const groupDiv = swipeContainer.closest('.favorites-date-group');
+    swipeContainer.remove();
+
+    // 如果该日期分组下没有其他卡片，则移除整个分组
+    if (groupDiv && groupDiv.querySelectorAll('.swipe-container').length === 0) {
+        groupDiv.remove();
+    }
+
+    // 4. 检查收藏页是否为空，若为空则显示空状态
+    const favoritesBody = document.getElementById('favoritesBody');
+    const remainingGroups = favoritesBody.querySelectorAll('.favorites-date-group');
+    if (remainingGroups.length === 0) {
+        favoritesBody.classList.add('empty');
+        favoritesBody.innerHTML = `
+            <div class="empty-favorites">
+                <i class="ri-heart-2-fill"></i>
+                <p>暂无收藏内容</p>
+            </div>
+        `;
+        favoritesBody.classList.remove('has-favorites');
+    }
+
+    // 5. 清除日期数据缓存（可选，保证下次加载时重新拉取）
+    clearDateCache();
+
+    // 6. 如果有打开的滑动状态，清理
+    if (currentlyOpenedSwipe === swipeContainer) {
+        currentlyOpenedSwipe = null;
+    }
+
+}
 function bindDeleteButtons() {
     const favoritesBody = document.getElementById('favoritesBody');
     if (!favoritesBody) return;
@@ -1492,6 +1701,13 @@ function buildPlaceholderCard(date, type) {
     `;
 }
 function navigateToContent(date, type) {
+    // 新增网络检测
+    if (!navigator.onLine || !isNetworkAvailable) {
+        showToast('网络连接不可用，请稍后再试', 1500);
+        showOfflinePlaceholder(true);
+        return;
+    }
+
     closeFavoritesModal();
     loadDataForDate(date);
     const typeIndex = tabOrder.indexOf(type);
@@ -1642,7 +1858,8 @@ async function loadChangelogs() {
     body.innerHTML = '<div class="loading-state"><i class="ri-loader-4-line"></i> 加载更新日志...</div>';
     try {
         const res = await fetch(`${API_BASE}/api/changelogs`);
-        const logs = await res.json();
+        const data = await res.json();
+        const logs = data.items || [];      
         if (!logs.length) {
             body.innerHTML = '<div class="empty-favorites"><i class="ri-history-line"></i><p>暂无更新日志</p></div>';
             return;
@@ -1681,20 +1898,18 @@ if (changelogModal) {
 async function fetchAndUpdateVersion() {
     try {
         const res = await fetch(`${API_BASE}/api/changelogs`);
-        const logs = await res.json();
+        const data = await res.json();
+        const logs = data.items || [];            // 关键修改
         const versionSpan = document.querySelector('.version');
         if (!versionSpan) return;
-
-        if (!Array.isArray(logs) || logs.length === 0) {
+        if (!logs.length) {
             versionSpan.textContent = 'V0.0.1';
             return;
         }
-
-        // 按日期降序排序，取最新一条的版本号
         const sorted = [...logs].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
         const latestVersion = sorted[0]?.version;
         versionSpan.textContent = latestVersion ? `V${latestVersion}` : 'V0.0.1';
-    } catch (err) {
+    }catch (err) {
         console.warn('获取最新版本失败', err);
         // 出错时不覆盖原有显示
     }
@@ -1752,7 +1967,24 @@ let dragState = {
         currentOffset: 0,
         isDragging: false
     };
+// 判断触摸点是否应该忽略（不启动拖拽切换）
+function shouldIgnoreTouch(target) {
+    // 模态框打开时禁用拖拽
+    if (document.body.classList.contains('favorites-open') ||
+        document.body.classList.contains('sidebar-open') ||
+        document.body.classList.contains('timeline-open') ||
+        document.body.classList.contains('changelog-open')) {
+        return true;
+    }
 
+    // 排除所有需要点击交互的元素（但允许音乐封面滑动）
+    const interactiveSelectors = [
+        '.favorite-btn',
+        '.share-btn',
+    ];
+
+    return target.closest(interactiveSelectors.join(','));
+}
 function initDragSwipe() {
     const cardContainer = document.querySelector('.card-container');
     if (!cardContainer) return;
@@ -1760,7 +1992,7 @@ function initDragSwipe() {
     const allCards = document.querySelectorAll('.card');
     if (!allCards.length) return;
 
-    let isSettling = false;  // 防止动画未完成时重复拖拽
+    let isSettling = false;          // 动画中禁止新拖拽
     let dragState = {
         active: false,
         startX: 0,
@@ -1771,9 +2003,12 @@ function initDragSwipe() {
         containerWidth: 0,
         baseTransforms: [],
         currentOffset: 0,
-        isDragging: false
+        isDragging: false,
+        startImgEl: null,            // 触摸起始的图片元素
+        startImgSrc: null            // 图片src
     };
 
+    // ========== 辅助函数 ==========
     function getContainerWidth() {
         return cardContainer.clientWidth;
     }
@@ -1837,6 +2072,27 @@ function initDragSwipe() {
                 card.style.opacity = '0';
                 card.style.zIndex = '1';
             }
+        }
+    }
+
+    // 新增：无动画立即恢复基准位置（用于图片预览场景）
+    function resetToBaseNoTransition() {
+        for (let i = 0; i < allCards.length; i++) {
+            const card = allCards[i];
+            const base = dragState.baseTransforms[i];
+            card.style.transition = 'none';
+            card.style.transform = `translateX(${base}px)`;
+            if (i === dragState.startIndex) {
+                card.style.opacity = '1';
+                card.style.zIndex = '2';
+            } else {
+                card.style.opacity = '0';
+                card.style.zIndex = '1';
+            }
+        }
+        void allCards[0].offsetHeight;
+        for (let i = 0; i < allCards.length; i++) {
+            allCards[i].style.transition = '';
         }
     }
 
@@ -1937,11 +2193,6 @@ function initDragSwipe() {
             }, 400);
         } else {
             performSwitch(dragState.startIndex, true);
-            if (direction === 'right' && currentIndex === 0) {
-                showToast('没有最新的内容了');
-            } else if (direction === 'left' && currentIndex === tabOrder.length - 1) {
-                showToast('没有更早的内容了');
-            }
             setTimeout(() => {
                 isSettling = false;
                 dragState.active = false;
@@ -1949,32 +2200,47 @@ function initDragSwipe() {
         }
     }
 
-    // ---------- 新增：排除可交互元素 ----------
+    // 判断触摸点是否应该忽略拖拽（不影响图片预览）
     function shouldIgnoreTouch(target) {
-        // 模态框打开时禁用拖拽
         if (document.body.classList.contains('favorites-open') ||
             document.body.classList.contains('sidebar-open') ||
             document.body.classList.contains('timeline-open') ||
             document.body.classList.contains('changelog-open')) {
             return true;
         }
-        // 排除所有需要点击交互的元素
+
         const interactiveSelectors = [
             '.favorite-btn',
             '.share-btn',
-            '.play-pause-icon',
-            '.progress-bar',
-            '.stats-actions button',
-            '.album-image'
         ];
+
         return target.closest(interactiveSelectors.join(','));
     }
-    // ----------------------------------------
 
+    // 新增：从触摸目标获取可预览的图片元素
+    function getImageElementFromTarget(target) {
+        // 音乐封面
+        if (target.closest('.album-image img')) {
+            return target.closest('.album-image img');
+        }
+        // 句子图片
+        if (target.closest('#sentenceImg')) {
+            return document.getElementById('sentenceImg');
+        }
+        // 文章头图
+        if (target.closest('#article .bg-img img')) {
+            return document.querySelector('#article .bg-img img');
+        }
+        // 收藏卡片中的图片（可选）
+        if (target.closest('.favorite-card img')) {
+            return target.closest('.favorite-card img');
+        }
+        return null;
+    }
+
+    // ========== 触摸事件 ==========
     function onTouchStart(e) {
         if (isSettling || isAnimating || isDateSwitching) return;
-
-        // 如果触摸起点在可交互元素上，不启动拖拽
         if (shouldIgnoreTouch(e.target)) return;
 
         const touch = e.touches[0];
@@ -1987,6 +2253,9 @@ function initDragSwipe() {
         dragState.containerWidth = getContainerWidth();
         dragState.currentOffset = 0;
         dragState.isDragging = false;
+        // 记录起始图片元素
+        dragState.startImgEl = getImageElementFromTarget(e.target);
+        dragState.startImgSrc = dragState.startImgEl ? dragState.startImgEl.src : null;
 
         for (let i = 0; i < allCards.length; i++) {
             allCards[i].style.transition = 'none';
@@ -2089,6 +2358,20 @@ function initDragSwipe() {
             }
         }
 
+        // 新增：未发生切换且未拖拽，且起始于图片时，触发图片预览
+        if (!shouldSwitch && !dragState.isDragging && dragState.startImgEl && dragState.startImgSrc) {
+            if (!window._imagePreviewLock) {
+                window._imagePreviewLock = true;
+                openImagePreview(dragState.startImgSrc);
+                setTimeout(() => { window._imagePreviewLock = false; }, 300);
+            }
+            // 快速恢复卡片位置（无动画）
+            resetToBaseNoTransition();
+            dragState.active = false;
+            return;
+        }
+
+        // 原有切换逻辑
         if (shouldSwitch && switchDirection !== 0) {
             const newIndex = dragState.startIndex + switchDirection;
             if (newIndex >= 0 && newIndex < tabOrder.length) {
@@ -2108,16 +2391,13 @@ function initDragSwipe() {
         }
     }
 
+    // 注册事件
     cardContainer.addEventListener('touchstart', onTouchStart, { passive: false });
     cardContainer.addEventListener('touchmove', onTouchMove, { passive: false });
     cardContainer.addEventListener('touchend', onTouchEnd);
     cardContainer.addEventListener('touchcancel', onTouchEnd);
-
-    window.resetDragState = function() {
-        dragState.active = false;
-        isSettling = false;
-    };
 }
+
 function injectFavoriteCardStyles() {
     const styleId = 'favorite-card-styles';
     if (document.getElementById(styleId)) return;
@@ -2159,6 +2439,22 @@ function injectFavoriteCardStyles() {
 }
 // ========== 初始化 ==========
 document.addEventListener('DOMContentLoaded', async () => {
+  const initialLoader = document.getElementById('initialLoader');
+  if (navigator.onLine) {
+    document.body.classList.add('online');
+} else {
+    document.body.classList.remove('online');
+}
+	    if (typeof window.plus !== 'undefined') {
+	        window.plus.isReady = false;
+	        document.addEventListener('plusready', function() {
+	            window.plus.isReady = true;
+	            console.log('5+ Runtime ready');
+	        });
+	    } else {
+	        // 非 5+ 环境（浏览器）模拟 isReady，避免报错
+	        window.plus = { isReady: true, share: null };
+	    }
     // 初始化 UI 相关设置（不依赖数据）
     if (document.fonts && document.fonts.ready) {
         document.fonts.ready.then(() => {
@@ -2201,12 +2497,14 @@ injectFavoriteCardStyles();
     // 获取所有已发布日期（升序）
     const allDates = await fetchPublishedDatesList();
 
-    if (allDates.length === 0) {
-        // 没有任何发布日期，显示错误提示并停止加载
-        console.error('无法获取任何发布日期，请检查后端接口');
-        showToast('暂无内容，请稍后再试', 3000);
-        return;
+if (allDates.length === 0) {
+    console.error('无法获取任何发布日期，请检查后端接口');
+    showToast('暂无内容，请稍后再试', 3000);
+    if (initialLoader) {
+        initialLoader.classList.add('hide');
     }
+    return;
+}
 
     // 最新日期（升序数组最后一个）
     const latestDate = allDates[allDates.length - 1];
@@ -2228,16 +2526,54 @@ if (!allDates.includes(initialDate)) {
     showToast(`日期不存在，已为您跳转至最新内容`, 2000);
 }
     }
+window.addEventListener('online', () => {
+    console.log('网络已恢复');
+    // 自动重试
+    retryNetworkAndReload();
+});
+window.addEventListener('offline', () => {
+    console.log('网络已断开');
+    isNetworkAvailable = false;
+    showOfflinePlaceholder(true);
+});
 
-    // 加载初始日期内容
-    displayDateInNav(initialDate);
+// 占位符点击重试
+if (offlinePlaceholder) {
+    offlinePlaceholder.addEventListener('click', (e) => {
+        e.stopPropagation();
+        retryNetworkAndReload();
+    });
+}
+
+// 初次加载时，如果浏览器认为离线，直接显示占位符
+if (!navigator.onLine) {
+    isNetworkAvailable = false;
+    showOfflinePlaceholder(true);
+}
+displayDateInNav(initialDate);
+try {
     await loadDataForDate(initialDate);
-    await fetchPublishedDatesList(); // 确保日期列表已缓存（无额外开销）
-    updateHighlight();
-    updateCardVerticalPosition();
-
-    // 初始化跟手滑动模块（已包含按钮点击排除逻辑）
-    initDragSwipe();
+} catch (err) {
+    console.warn('初始数据加载失败', err);
+} finally {
+    // 无论成功或失败，都隐藏加载动画
+    if (initialLoader) {
+        initialLoader.classList.add('hide');
+        // 可选：延迟移除 DOM 元素，避免占用资源
+        setTimeout(() => {
+            if (initialLoader && initialLoader.parentNode) {
+                initialLoader.parentNode.removeChild(initialLoader);
+            }
+        }, 500);
+    }
+}
+await fetchPublishedDatesList(); // 确保日期列表已缓存（无额外开销）
+updateHighlight();
+updateCardVerticalPosition();
+initDragSwipe();
+initImagePreviewModal();
+bindImagePreviewTriggers();
+    
 });
 
 function resetPageContentTransform() {
@@ -2250,25 +2586,18 @@ function resetPageContentTransform() {
     }
 }
 
-if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js')
-        .then(reg => console.log('SW registered', reg))
-        .catch(err => console.error('SW failed', err));
-}
 // ========== 增强分享模块 (完整版) ==========
+// ========== 增强分享模块 (5+ App 系统分享 + 浏览器降级) ==========
 (function() {
-    // 获取当前日期（多重保障）
+    // 获取当前日期（从 URL 或全局变量）
     function getCurrentDate() {
         if (window.currentDate) return window.currentDate;
-        if (typeof window.getCurrentDate === 'function') return window.getCurrentDate();
-        // 尝试从 URL 参数获取
         const urlParams = new URLSearchParams(window.location.search);
         const dateFromUrl = urlParams.get('date');
         if (dateFromUrl) return dateFromUrl;
         return null;
     }
 
-    // 获取当前页面链接（带日期参数）
     function getCurrentShareUrl() {
         let url = window.location.href;
         const date = getCurrentDate();
@@ -2279,13 +2608,13 @@ if ('serviceWorker' in navigator) {
         return url;
     }
 
-    // 复制链接
     async function copyLinkToClipboard() {
         const url = getCurrentShareUrl();
         try {
             await navigator.clipboard.writeText(url);
             return true;
         } catch (err) {
+            // 降级方案
             const textarea = document.createElement('textarea');
             textarea.value = url;
             document.body.appendChild(textarea);
@@ -2308,7 +2637,7 @@ if ('serviceWorker' in navigator) {
         }
     }
 
-    // 更新分享计数
+    // 更新分享计数（调用后端接口）
     async function updateShareCount(type, date, delta = 1) {
         const actionsDiv = document.querySelector(`.stats-actions[data-type="${type}"]`);
         if (!actionsDiv) return false;
@@ -2322,6 +2651,7 @@ if ('serviceWorker' in navigator) {
         const newCount = oldCount + delta;
         countSpan.innerText = newCount;
 
+        // 添加简单动画
         shareBtn.style.transform = 'scale(1.05)';
         setTimeout(() => { if (shareBtn) shareBtn.style.transform = ''; }, 200);
 
@@ -2341,55 +2671,173 @@ if ('serviceWorker' in navigator) {
         } catch (err) {
             console.error('分享计数更新失败', err);
             countSpan.innerText = oldCount;
-            showMsg('分享失败，请稍后重试');
             return false;
         }
     }
 
+    // 从 DOM 或缓存中提取分享内容（文本 + 链接）
+    function getShareDataFromDOM(type, date) {
+        const href = window.location.href.split('?')[0] + `?date=${date}`;
+        let title = '', content = '', thumb = '';
+
+        if (type === 'music') {
+            title = document.querySelector('.track-album')?.innerText || '';
+            content = document.querySelector('.track-singer')?.innerText || '';
+            thumb = document.getElementById('album-img')?.src || '';
+            if (!title && window.dateDataCache?.get(date)?.music) {
+                const music = window.dateDataCache.get(date).music;
+                title = music.title || '';
+                content = music.artist || '';
+                thumb = music.cover || '';
+            }
+        } else if (type === 'sentence') {
+            title = '句子摘录';
+            content = document.getElementById('sentenceText')?.innerText || '';
+            const author = document.querySelector('#sentence .from span')?.innerText || '';
+            if (author) content += ` ——${author}`;
+            thumb = document.getElementById('sentenceImg')?.src || '';
+            if (!content && window.dateDataCache?.get(date)?.sentence) {
+                const sent = window.dateDataCache.get(date).sentence;
+                content = sent.text || '';
+                if (sent.author) content += ` ——${sent.author}`;
+                thumb = sent.image || '';
+            }
+        } else if (type === 'article') {
+            title = document.getElementById('article-title')?.innerText || '';
+            content = document.getElementById('article-author')?.innerText || '';
+            const articleText = document.getElementById('article-content')?.innerText || '';
+            if (articleText) content += ' ' + articleText.slice(0, 100);
+            thumb = document.querySelector('#article .bg-img img')?.src || '';
+            if (!title && window.dateDataCache?.get(date)?.article) {
+                const art = window.dateDataCache.get(date).article;
+                title = art.title || '';
+                content = art.author || '';
+                if (art.content) content += ' ' + art.content.slice(0, 100);
+                thumb = art.image || '';
+            }
+        }
+
+        content = content.replace(/\n/g, ' ').slice(0, 200);
+        if (!thumb) thumb = 'img/default-share.png';
+        return { title, content, thumb, href };
+    }
+
+    // 核心：调用系统分享面板（5+ 专用）
+    function doSystemShare(text, href) {
+        return new Promise((resolve, reject) => {
+            // 确保 plus 对象存在且 share 模块已加载
+            if (!window.plus || !window.plus.share) {
+                reject(new Error('plus.share 不可用'));
+                return;
+            }
+            // 构建分享消息（纯文本 + 链接）
+            const msg = {
+                type: 'text',
+                content: text,
+                href: href,
+                thumbs: [],      // 系统分享通常不需要缩略图，保持空数组
+                summary: text
+            };
+            plus.share.sendWithSystem(msg, () => {
+                resolve(true);
+            }, (err) => {
+                reject(err);
+            });
+        });
+    }
+
     let isSharingPending = false;
+    let activeShareContext = null;
+
+    // 主分享逻辑
     async function performShare(action, context) {
         if (isSharingPending) return;
         isSharingPending = true;
 
         const { type, date } = context;
-        let shareSuccess = false;
-        let needToastMsg = '';
+        const shareUrl = getCurrentShareUrl();
+        const shareData = getShareDataFromDOM(type, date);
+        // 生成分享文本：标题 + 内容 + 链接
+        const shareText = `${shareData.title}\n${shareData.content}\n${shareUrl}`;
 
-        try {
-            if (action === 'copy') {
-                const ok = await copyLinkToClipboard();
-                shareSuccess = ok;
-                needToastMsg = ok ? '链接已复制' : '复制失败，请手动复制';
-            } else {
-                const ok = await copyLinkToClipboard();
-                shareSuccess = ok;
-                if (action === 'wechat') needToastMsg = ok ? '链接已复制，打开微信粘贴给好友' : '复制失败，请重试';
-                else if (action === 'moments') needToastMsg = ok ? '链接已复制，可分享到微信朋友圈' : '复制失败，请重试';
-                else if (action === 'qq') needToastMsg = ok ? '链接已复制，打开QQ发送给好友' : '复制失败，请重试';
-            }
-
-            if (shareSuccess) {
+        // 如果用户点击的是“复制链接”
+        if (action === 'copy') {
+            const ok = await copyLinkToClipboard();
+            if (ok) {
                 await updateShareCount(type, date, 1);
-                showMsg(needToastMsg, 1800);
-                closeSharePanel();
+                showMsg('链接已复制', 1500);
             } else {
-                showMsg(needToastMsg || '分享失败', 1500);
+                showMsg('复制失败', 1500);
             }
-        } catch (err) {
-            console.error('分享操作异常', err);
-            showMsg('分享失败，请稍后再试');
-        } finally {
+            closeSharePanel();
             isSharingPending = false;
+            return;
         }
+
+        // 判断是否在 5+ App 环境中
+        const isPlusEnv = typeof window.plus !== 'undefined' && window.plus && window.plus.share;
+
+        if (isPlusEnv) {
+            // 确保 plus 已经就绪
+            if (window.plus.isReady) {
+                try {
+                    await doSystemShare(shareText, shareUrl);
+                    await updateShareCount(type, date, 1);
+                    showMsg('分享成功', 1200);
+                } catch (err) {
+                    console.error('系统分享失败', err);
+                    // 降级：复制链接
+                    const copied = await copyLinkToClipboard();
+                    if (copied) {
+                        await updateShareCount(type, date, 1);
+                        showMsg('已复制链接，可手动粘贴分享', 1500);
+                    } else {
+                        showMsg('分享失败', 1500);
+                    }
+                }
+            } else {
+                // 等待 plusready 事件
+                document.addEventListener('plusready', async () => {
+                    try {
+                        await doSystemShare(shareText, shareUrl);
+                        await updateShareCount(type, date, 1);
+                        showMsg('分享成功', 1200);
+                    } catch (err) {
+                        const copied = await copyLinkToClipboard();
+                        if (copied) {
+                            await updateShareCount(type, date, 1);
+                            showMsg('已复制链接，可手动粘贴分享', 1500);
+                        } else {
+                            showMsg('分享失败', 1500);
+                        }
+                    }
+                    closeSharePanel();
+                    isSharingPending = false;
+                });
+                return;
+            }
+        } else {
+            // 浏览器环境：复制链接
+            const copied = await copyLinkToClipboard();
+            if (copied) {
+                await updateShareCount(type, date, 1);
+                showMsg('链接已复制', 1500);
+            } else {
+                showMsg('分享失败', 1500);
+            }
+        }
+
+        closeSharePanel();
+        isSharingPending = false;
     }
 
-    let activeShareContext = null;
+    // 打开分享面板（移动端底部弹窗）
     function openSharePanel(type, date) {
         if (!type || !date) {
             showMsg('数据加载中，请稍后重试');
             return;
         }
-        // 关闭其他模态框
+        // 关闭其他打开的弹窗
         if (document.body.classList.contains('favorites-open') && typeof window.closeFavoritesModal === 'function') window.closeFavoritesModal();
         if (document.body.classList.contains('timeline-open') && typeof window.closeTimelineModal === 'function') window.closeTimelineModal();
         if (document.body.classList.contains('changelog-open') && typeof window.closeChangelogModal === 'function') window.closeChangelogModal();
@@ -2416,6 +2864,7 @@ if ('serviceWorker' in navigator) {
         activeShareContext = null;
     }
 
+    // 绑定分享面板内按钮事件
     function bindShareEvents() {
         const modal = document.getElementById('shareModal');
         if (!modal) return;
@@ -2441,6 +2890,7 @@ if ('serviceWorker' in navigator) {
         if (panel) panel.addEventListener('click', (e) => e.stopPropagation());
     }
 
+    // 拦截所有分享按钮的点击
     function interceptShareButtons() {
         document.body.addEventListener('click', (e) => {
             const shareBtn = e.target.closest('.share-btn');
@@ -2463,6 +2913,7 @@ if ('serviceWorker' in navigator) {
         }, true);
     }
 
+    // 初始化：在 DOM 加载完成后绑定事件
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => {
             bindShareEvents();
@@ -2473,13 +2924,19 @@ if ('serviceWorker' in navigator) {
         interceptShareButtons();
     }
 
+    // 暴露全局函数（便于调试）
     window.openSharePanel = openSharePanel;
     window.closeSharePanel = closeSharePanel;
+    window.getShareDataFromDOM = getShareDataFromDOM;
 })();
-
 // ========== 夜间模式管理 ==========
 const THEME_STORAGE_KEY = 'site_theme';
 const DARK_CLASS = 'dark-mode';
+
+// 用于等待侧边栏关闭动画完成后再切换主题
+let pendingThemeSwitch = null;
+let sidebarTransitionListener = null;
+let fallbackTimer = null;
 
 // 获取夜间模式菜单项
 const nightModeMenuItem = Array.from(document.querySelectorAll('.sidebar-menu .menu-item'))
@@ -2489,7 +2946,7 @@ const nightModeMenuItem = Array.from(document.querySelectorAll('.sidebar-menu .m
 function updateThemeMenuItem(isDark) {
     if (!nightModeMenuItem) return;
     const icon = nightModeMenuItem.querySelector('i');
-    const textNode = nightModeMenuItem.childNodes[1]; // 文字节点
+    const textNode = nightModeMenuItem.childNodes[1];
     
     if (isDark) {
         if (icon) {
@@ -2501,7 +2958,6 @@ function updateThemeMenuItem(isDark) {
         } else if (nightModeMenuItem.lastChild && nightModeMenuItem.lastChild.nodeType === Node.TEXT_NODE) {
             nightModeMenuItem.lastChild.textContent = ' 日间模式';
         } else {
-            // 确保文字正确更新
             const textSpan = Array.from(nightModeMenuItem.childNodes).find(n => n.nodeType === Node.TEXT_NODE);
             if (textSpan) textSpan.textContent = ' 日间模式';
         }
@@ -2530,34 +2986,395 @@ function applyTheme(isDark) {
     }
     updateThemeMenuItem(isDark);
     localStorage.setItem(THEME_STORAGE_KEY, isDark ? 'dark' : 'light');
+    setStatusBarStyle();
 }
 
-// 切换主题
-function toggleTheme() {
-    const isCurrentlyDark = document.body.classList.contains(DARK_CLASS);
-    applyTheme(!isCurrentlyDark);
-    // 切换后关闭侧边栏
-    if (typeof closeSidebar === 'function') {
-        closeSidebar();
+// 清除等待切换的残留监听与定时器
+function clearPendingThemeSwitch() {
+    if (sidebarTransitionListener) {
+        sidebar.removeEventListener('transitionend', sidebarTransitionListener);
+        sidebarTransitionListener = null;
+    }
+    if (fallbackTimer) {
+        clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+    }
+    pendingThemeSwitch = null;
+}
+
+// 执行实际的主题切换
+function executePendingThemeSwitch() {
+    if (pendingThemeSwitch !== null) {
+        applyTheme(pendingThemeSwitch);
+        clearPendingThemeSwitch();
     }
 }
 
-// 初始化主题（从 localStorage 读取）
+// 切换主题（入口）
+function toggleTheme() {
+    const isCurrentlyDark = document.body.classList.contains(DARK_CLASS);
+    const targetDark = !isCurrentlyDark;
+    applyTheme(targetDark);
+}
+
+// 初始化主题
 function initTheme() {
     const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
     const isDark = savedTheme === 'dark';
     applyTheme(isDark);
+    
+// 等待 plusready 后设置状态栏
+if (window.plus) {
+    document.addEventListener('plusready', function() {
+        setStatusBarStyle();
+    });
+} else {
+    // 非 App 环境直接重置（但保留页面布局）
+    setStatusBarStyle();
+}
 }
 
 // 绑定夜间模式菜单点击事件
 function bindNightModeToggle() {
     if (!nightModeMenuItem) return;
-    // 移除原有监听器避免重复绑定
     nightModeMenuItem.removeEventListener('click', toggleTheme);
     nightModeMenuItem.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
         toggleTheme();
+    });
+}
+// ========== 手机系统返回键处理（5+ App 专用） ==========
+(function() {
+    // 弹窗栈：存储当前打开的模态框及其关闭函数
+    let modalStack = [];
+    let backButtonPressed = 0;
+
+    // 注册模态框（添加到栈顶）
+    function registerModal(modalElement, closeFunction) {
+        // 如果已经存在相同元素，先移除
+        unregisterModal(modalElement);
+        modalStack.push({
+            element: modalElement,
+            close: closeFunction
+        });
+    }
+
+    // 注销模态框（从栈中移除）
+    function unregisterModal(modalElement) {
+        const index = modalStack.findIndex(item => item.element === modalElement);
+        if (index !== -1) {
+            modalStack.splice(index, 1);
+        }
+    }
+
+    // 关闭当前最顶层的模态框
+    function closeTopModal() {
+        if (modalStack.length === 0) return false;
+        const topModal = modalStack[modalStack.length - 1];
+        if (topModal && typeof topModal.close === 'function') {
+            topModal.close();
+            modalStack.pop();
+            return true;
+        }
+        return false;
+    }
+
+    // 检查并注册模态框的状态变化
+    function observeModal(element, className, closeFn) {
+        if (!element) return;
+
+        let isActive = false;
+        const observer = new MutationObserver((mutations) => {
+            mutations.forEach((mutation) => {
+                if (mutation.attributeName === 'class') {
+                    const nowActive = element.classList.contains(className);
+                    if (nowActive && !isActive) {
+                        // 模态框打开，注册
+                        registerModal(element, closeFn);
+                    } else if (!nowActive && isActive) {
+                        // 模态框关闭，注销
+                        unregisterModal(element);
+                    }
+                    isActive = nowActive;
+                }
+            });
+        });
+
+        // 初始化当前状态
+        isActive = element.classList.contains(className);
+        if (isActive) registerModal(element, closeFn);
+
+        observer.observe(element, { attributes: true });
+        return observer;
+    }
+
+    // 等待 DOM 和 plusready 就绪后初始化返回键监听
+    function initBackButton() {
+        // 1. 观察 body 上的全局模态框类
+        const body = document.body;
+        // 侧边栏
+        observeModal(body, 'sidebar-open', window.closeSidebar);
+        // 时间轴
+        observeModal(body, 'timeline-open', window.closeTimelineModal);
+        // 收藏页
+        observeModal(body, 'favorites-open', window.closeFavoritesModal);
+        // 更新日志
+        observeModal(body, 'changelog-open', window.closeChangelogModal);
+
+        // 2. 观察分享面板（独立元素）
+        const shareModal = document.getElementById('shareModal');
+        if (shareModal) {
+            observeModal(shareModal, 'active', window.closeSharePanel);
+        }
+            // 3. 观察图片预览弹窗 ← 新增代码
+    const imagePreviewModal = document.getElementById('imagePreviewModal');
+    if (imagePreviewModal) {
+        observeModal(imagePreviewModal, 'active', closeImagePreview);
+    }
+        // 3. 监听返回键
+        document.addEventListener('plusready', function() {
+            plus.key.addEventListener('backbutton', function() {
+                // 优先关闭任何打开的模态框
+                if (closeTopModal()) {
+                    return;
+                }
+
+                // 没有模态框时，处理双击退出
+                if (backButtonPressed === 0) {
+                    backButtonPressed = 1;
+                    if (window.showToast) {
+                        window.showToast('再按一次退出应用', 1500);
+                    } else {
+                        const toast = document.createElement('div');
+                        toast.className = 'toast';
+                        toast.textContent = '再按一次退出应用';
+                        document.body.appendChild(toast);
+                        setTimeout(() => toast.remove(), 1500);
+                    }
+                    setTimeout(function() {
+                        backButtonPressed = 0;
+                    }, 2000);
+                } else {
+                    plus.runtime.quit();
+                }
+            });
+        });
+
+        // 如果 plus 已经就绪（比如在 5+ App 中脚本加载较晚），直接执行
+        if (window.plus && window.plus.key) {
+            // 手动触发 plusready 回调（如果事件已错过）
+            const evt = document.createEvent('Event');
+            evt.initEvent('plusready', true, true);
+            document.dispatchEvent(evt);
+        }
+    }
+
+    // 在 DOM 加载完成后初始化
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initBackButton);
+    } else {
+        initBackButton();
+    }
+})();
+// ========== 沉浸式状态栏（5+ App）修复版 ==========
+
+function setStatusBarStyle() {
+    if (!window.plus || !plus.navigator) return;
+
+    const isDark = document.body.classList.contains('dark-mode');
+    plus.navigator.setStatusBarBackground('rgba(0,0,0,0)');
+    plus.navigator.setStatusBarStyle(isDark ? 'light' : 'dark');
+
+    // 获取状态栏实际高度（px）
+    const statusBarHeight = plus.navigator.getStatusbarHeight();
+    const elements = document.querySelectorAll('.top-nav, .sidebar-header, .timeline-header, .favorites-header, .changelog-header');
+    
+    elements.forEach(el => {
+        if (el) {
+            el.style.paddingTop = statusBarHeight + 'px';
+        }
+    });
+
+    if (typeof updateCardVerticalPosition === 'function') {
+        updateCardVerticalPosition();
+    }
+}
+// ========== 图片预览模块（支持保存到相册） ==========
+let currentPreviewUrl = '';
+
+function openImagePreview(url) {
+    if (!url || url === '') return;
+    currentPreviewUrl = url;
+    const modal = document.getElementById('imagePreviewModal');
+    const img = document.getElementById('previewImage');
+    if (!modal || !img) return;
+
+    img.src = url;
+    modal.classList.add('active');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeImagePreview() {
+    const modal = document.getElementById('imagePreviewModal');
+    if (!modal) return;
+    modal.classList.remove('active');
+    document.body.style.overflow = '';
+    currentPreviewUrl = '';
+}
+
+async function saveCurrentImage() {
+    if (!currentPreviewUrl) {
+        showToast('暂无图片可保存');
+        return;
+    }
+
+    const isPlusEnv = typeof window.plus !== 'undefined' && window.plus && window.plus.gallery;
+
+    if (isPlusEnv) {
+        if (!window.plus.isReady) {
+            showToast('系统未就绪，请稍后重试');
+            return;
+        }
+        if (plus.os.name === 'Android') {
+            const permission = 'android.permission.WRITE_EXTERNAL_STORAGE';
+            if (plus.android.checkPermission(permission) !== 'granted') {
+                plus.android.requestPermissions([permission], function(e) {
+                    if (e.granted.length > 0) {
+                        saveToGallery();
+                    } else {
+                        showToast('需要存储权限才能保存图片');
+                    }
+                }, function(e) {
+                    showToast('权限申请失败');
+                });
+                return;
+            }
+        }
+        saveToGallery();
+    } else {
+        downloadImageInBrowser();
+    }
+}
+
+function saveToGallery() {
+    showToast('正在保存...', 1500);
+    plus.gallery.save(currentPreviewUrl, function() {
+        showToast('保存成功', 1500);
+        closeImagePreview();  // 新增：保存成功后关闭弹窗
+    }, function(err) {
+        console.error('保存失败', err);
+        // 降级下载
+        plus.downloader.createDownload(currentPreviewUrl, { filename: '_downloads/temp_img.jpg' }, function(d, status) {
+            if (status === 200) {
+                plus.gallery.save(d.filename, function() {
+                    showToast('保存成功', 1500);
+                    closeImagePreview();  // 新增：降级保存成功后关闭弹窗
+                }, function() {
+                    showToast('保存失败，请检查权限');
+                });
+            } else {
+                showToast('保存失败');
+            }
+        }).start();
+    });
+}
+
+async function downloadImageInBrowser() {
+    try {
+        // 尝试 fetch 图片（需要 CORS 支持）
+        const response = await fetch(currentPreviewUrl);
+        if (!response.ok) throw new Error('获取图片失败');
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = 'preview_image.jpg';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(blobUrl);
+        closeImagePreview();
+    } catch (err) {
+        console.warn('Blob 下载失败，降级为长按保存提示', err);
+        // 降级：提示用户长按图片保存
+        showToast('请长按图片保存', 2000);
+        // 可选：仍打开图片供用户长按
+        // window.open(currentPreviewUrl, '_blank');
+        closeImagePreview();
+    }
+}
+
+function bindImagePreviewTriggers() {
+    // 音乐封面
+    const albumImg = document.getElementById('album-img');
+    if (albumImg) {
+        albumImg.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (albumImg.src && albumImg.style.display !== 'none') {
+                openImagePreview(albumImg.src);
+            }
+        });
+    }
+    // 句子图片
+    const sentenceImg = document.getElementById('sentenceImg');
+    if (sentenceImg) {
+        sentenceImg.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (sentenceImg.src) {
+                openImagePreview(sentenceImg.src);
+            }
+        });
+    }
+    // 文章头图
+    const articleImg = document.querySelector('#article .bg-img img');
+    if (articleImg) {
+        articleImg.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (articleImg.src) {
+                openImagePreview(articleImg.src);
+            }
+        });
+    }
+
+    // 收藏卡片中的缩略图（动态绑定，使用事件委托）
+    document.body.addEventListener('click', (e) => {
+        const thumbnail = e.target.closest('.favorite-card img');
+        if (!thumbnail || !thumbnail.src) return;
+
+        // ========== 新增：如果点击发生在收藏模态框内，则取消预览 ==========
+        const favoritesModal = document.getElementById('favoritesModal');
+        // 方式1：检查模态框是否可见（通过类名）
+        if (document.body.classList.contains('favorites-open')) {
+            return;
+        }
+        // 方式2（更安全）：检查点击元素是否在模态框内部
+        if (favoritesModal && favoritesModal.contains(thumbnail)) {
+            return;
+        }
+        // ============================================================
+
+        e.stopPropagation();
+        openImagePreview(thumbnail.src);
+    });
+}
+
+function initImagePreviewModal() {
+    const modal = document.getElementById('imagePreviewModal');
+    if (!modal) return;
+
+    const closeBtn = modal.querySelector('.close-preview');
+    const overlay = modal.querySelector('.image-preview-overlay');
+    if (closeBtn) closeBtn.addEventListener('click', closeImagePreview);
+    if (overlay) overlay.addEventListener('click', closeImagePreview);
+
+    const saveBtn = document.getElementById('saveImageBtn');
+    if (saveBtn) saveBtn.addEventListener('click', saveCurrentImage);
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && modal.classList.contains('active')) {
+            closeImagePreview();
+        }
     });
 }
 window.toggleCard = function () { };
