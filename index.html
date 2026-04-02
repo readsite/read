@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, shrink-to-fit=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, shrink-to-fit=no, viewport-fit=cover">
     <title>Read.</title>
     <link href="img/favicon.png" rel="icon">
 <link rel="preload" as="font" href="font/simsun.woff2" type="font/woff2" crossorigin>
@@ -11,6 +11,7 @@
 <link rel="stylesheet" href="font/remixicon.css">
 </head>
 <body>
+
     <!-- 侧边栏 -->
     <div class="sidebar" id="sidebar">
         <div class="sidebar-header">
@@ -32,7 +33,8 @@
         </div>
         <div class="sidebar-footer">
             <div class="state">
-                <p>本站部分素材来自网络收集，侵权请联系删除</p>
+         <p>本站部分素材来自网络收集，侵权请联系删除</p>
+         <p style="text-algin:center">© 2026 Read.</p>
             </div>
         </div>
     </div>
@@ -59,6 +61,14 @@
         </nav>
 
         <div class="card-container">
+             <!-- 无网络占位符 -->
+    <div id="offlinePlaceholder" class="offline-placeholder" style="display: none;">
+    <div class="offline-content">
+        <i class="ri-wifi-off-line"></i>
+        <p>网络连接不可用</p>
+        <p class="retry-hint">点击页面刷新</p>
+    </div>
+</div>
             <!-- 音乐卡片 -->
             <div class="card" id="music">
                 <div class="card-inner">
@@ -85,8 +95,8 @@
                     <audio id="audio-source" src="" style="display: none;"></audio>
                 </div>
                 <div class="stats-actions" data-type="music">
-                    <button class="favorite-btn"><i class="ri-heart-2-line"></i> <span class="count"></span></button>
-                    <button class="share-btn"><i class="ri-share-2-line"></i> <span class="count"></span></button>
+                    <button class="favorite-btn"><i class="ri-heart-2-line"></i> <span class="count">0</span></button>
+                    <button class="share-btn"><i class="ri-share-2-line"></i> <span class="count">0</span></button>
                 </div>
             </div>
 
@@ -100,8 +110,8 @@
                     <p class="from"><span></span></p>
                 </div>
                 <div class="stats-actions" data-type="sentence">
-                    <button class="favorite-btn"><i class="ri-heart-2-line"></i> <span class="count"></span></button>
-                    <button class="share-btn"><i class="ri-share-2-line"></i> <span class="count"></span></button>
+                    <button class="favorite-btn"><i class="ri-heart-2-line"></i> <span class="count">0</span></button>
+                    <button class="share-btn"><i class="ri-share-2-line"></i> <span class="count">0</span></button>
                 </div>
             </div>
 
@@ -118,17 +128,18 @@
                     </div>
                 </div>
                 <div class="stats-actions" data-type="article">
-                    <button class="favorite-btn"><i class="ri-heart-2-line"></i> <span class="count"></span></button>
-                    <button class="share-btn"><i class="ri-share-2-line"></i> <span class="count"></span></button>
+                    <button class="favorite-btn"><i class="ri-heart-2-line"></i> <span class="count">0</span></button>
+                    <button class="share-btn"><i class="ri-share-2-line"></i> <span class="count">0</span></button>
                 </div>
             </div>
         </div>
-
-        <!-- 时间轴弹窗 -->
-        <div class="timeline-modal" id="timelineOverlay">
+    </div>
+	   <!-- 时间轴弹窗 -->
+    <div class="timeline-modal" id="timelineOverlay">
             <div class="timeline-modal-content">
                 <div class="timeline-header">
                     <i class="ri-arrow-left-long-line close-timeline"></i>
+                    <h3>回顾</h3>
                 </div>
                 <div class="timeline-body">
                     <div class="timeline-left">
@@ -140,8 +151,6 @@
                 </div>
             </div>
         </div>
-    </div>
-	
     <!-- 收藏页面模态框 -->
     <div class="favorites-modal" id="favoritesModal">
         <div class="favorites-modal-content">
@@ -156,7 +165,6 @@
             </div>
         </div>
     </div>
-
     <!-- 更新日志模态框 -->
     <div class="changelog-modal" id="changelogModal">
         <div class="changelog-modal-content">
@@ -171,8 +179,8 @@
             </div>
         </div>
     </div>
-<!-- ========== 分享弹窗（移动端） ========== -->
-<div id="shareModal" class="share-modal">
+    <!--分享弹窗（移动端）-->
+    <div id="shareModal" class="share-modal">
     <div class="share-overlay" id="shareOverlay"></div>
     <div class="share-panel">
         <div class="share-header">分享到</div>
@@ -195,6 +203,27 @@
             </div>
         </div>
         <div class="share-cancel" id="shareCancelBtn">取消</div>
+    </div>
+</div>
+    <!-- 图片预览弹窗 -->
+    <div id="imagePreviewModal" class="image-preview-modal">
+    <div class="image-preview-overlay"></div>
+    <div class="image-preview-container">
+        <div class="image-preview-header">
+        </div>
+        <div class="image-preview-body">
+            <img id="previewImage" src="" alt="预览图片">
+        </div>
+        <div class="image-preview-footer">
+            <button id="saveImageBtn" class="save-image-btn">保存图片</button>
+        </div>
+    </div>
+</div>
+  <!-- 初始加载动画 -->
+<div class="initial-loader" id="initialLoader">
+    <div class="loader-content">
+        <i class="ri-loader-4-line"></i>
+        <p>正在加载...</p>
     </div>
 </div>
     <script src="js/script.js"></script>
